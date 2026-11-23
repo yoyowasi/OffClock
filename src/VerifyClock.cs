@@ -193,7 +193,16 @@ namespace OffClock
                     dialog.Shown += delegate
                     {
                         display.SelectedIndex = (int)DisplayMode.Earnings;
-                        ((TextBox)dialog.Controls["AnnualSalary"]).Text = "50,400,000";
+                        var salaryInput = (TextBox)dialog.Controls["AnnualSalary"];
+                        var salaryText = (Label)dialog.Controls["AnnualSalaryInKorean"];
+                        salaryInput.Text = "123456789";
+                        Require(salaryText.Text == "일억 이천삼백사십오만 육천칠백팔십구 원", "Preview reads 억 and 만");
+                        salaryInput.Text = "50,400,000";
+                        Require(salaryText.Text == "오천사십만 원", "Preview updates while typing");
+                        int updateClicks = 0;
+                        dialog.CheckForUpdate = delegate { updateClicks++; };
+                        ((Button)dialog.Controls["CheckForUpdate"]).PerformClick();
+                        Require(updateClicks == 1, "Manual update button must invoke the action");
                         ((CheckBox)dialog.Controls["AutoUpdates"]).Checked = true;
                         monitor.SelectedIndex = target.Primary ? 1 : 2;
                         transparency.Value = ClockSettings.MaxTransparency;
@@ -212,7 +221,7 @@ namespace OffClock
                 ClockSettings saved = store.Load();
                 Require(saved.Schedule.Start == legacy.Schedule.Start && saved.Schedule.End == legacy.Schedule.End &&
                     saved.Display == DisplayMode.Earnings && saved.Monitor == target.DeviceName &&
-                    saved.AnnualSalary == 50400000 && saved.AutoCheckUpdates,
+                    saved.AnnualSalary == 50400000 && saved.AutoUpdate,
                     "Saved display or schedule was lost");
                 Require(saved.Transparency == 70 && !saved.ShowProgress && saved.NotifyAtEnd && saved.Theme == ClockTheme.Light,
                     "Saved appearance or reminder settings were lost");
@@ -221,6 +230,12 @@ namespace OffClock
                 Require(savedLines.Length == 11 && savedLines[0] == "09:20" && savedLines[1] == "18:30" &&
                     savedLines[2] == "Earnings" && savedLines[3] == target.DeviceName,
                     "Existing settings fields must keep their positions");
+                string savedUpdateMode = savedLines[10];
+                savedLines[10] = "True";
+                File.WriteAllLines(path, savedLines);
+                Require(!store.Load().AutoUpdate, "Old check-only preference must not opt in to installation");
+                savedLines[10] = savedUpdateMode;
+                File.WriteAllLines(path, savedLines);
                 using (var dialog = new ClockSettingsDialog(saved, null))
                 {
                     var transparency = (TrackBar)dialog.Controls["Transparency"];

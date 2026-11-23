@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Security;
+using System.Text;
 
 namespace OffClock
 {
@@ -38,11 +39,11 @@ namespace OffClock
         public readonly ClockTheme Theme;
         public readonly bool PinInside;
         public readonly long AnnualSalary;
-        public readonly bool AutoCheckUpdates;
+        public readonly bool AutoUpdate;
 
         public ClockSettings(Schedule schedule, DisplayMode display, string monitor = "",
             int transparency = 0, bool showProgress = true, bool notifyAtEnd = false, ClockTheme theme = ClockTheme.Dark,
-            bool pinInside = true, long annualSalary = 0, bool autoCheckUpdates = false)
+            bool pinInside = true, long annualSalary = 0, bool autoUpdate = false)
         {
             Schedule = schedule;
             Display = display == DisplayMode.Earnings && annualSalary <= 0 ? DisplayMode.Clock : display;
@@ -53,12 +54,45 @@ namespace OffClock
             Theme = theme;
             PinInside = pinInside;
             AnnualSalary = Math.Max(0, annualSalary);
-            AutoCheckUpdates = autoCheckUpdates;
+            AutoUpdate = autoUpdate;
         }
     }
 
     internal static class PayEstimate
     {
+        private const long MaxAnnualSalary = 999999999999L;
+
+        public static bool TryParseSalary(string text, out long salary)
+        {
+            return long.TryParse(text.Trim(), NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out salary) &&
+                salary >= 0 && salary <= MaxAnnualSalary;
+        }
+
+        public static string InKorean(long amount)
+        {
+            if (amount == 0) return "영 원";
+            const string digits = "영일이삼사오육칠팔구";
+            string[] groups = { "", "만", "억" };
+            string[] positions = { "", "십", "백", "천" };
+            var text = new StringBuilder();
+            for (int group = groups.Length - 1; group >= 0; group--)
+            {
+                int divisor = group == 2 ? 100000000 : group == 1 ? 10000 : 1;
+                int value = (int)(amount / divisor % 10000);
+                if (value == 0) continue;
+                if (text.Length > 0) text.Append(' ');
+                for (int place = 3, unit = 1000; place >= 0; place--, unit /= 10)
+                {
+                    int digit = value / unit % 10;
+                    if (digit == 0) continue;
+                    if (digit != 1 || place == 0) text.Append(digits[digit]);
+                    text.Append(positions[place]);
+                }
+                text.Append(groups[group]);
+            }
+            return text.Append(" 원").ToString();
+        }
+
         public static long At(long annualSalary, DateTime workDate, double progress)
         {
             if (workDate.DayOfWeek == DayOfWeek.Saturday || workDate.DayOfWeek == DayOfWeek.Sunday) return 0;
@@ -241,12 +275,12 @@ namespace OffClock
                     bool pinInside;
                     if (lines.Length < 9 || !bool.TryParse(lines[8], out pinInside)) pinInside = true;
                     long salary;
-                    if (lines.Length < 10 || !long.TryParse(lines[9], NumberStyles.None, CultureInfo.InvariantCulture, out salary))
+                    if (lines.Length < 10 || !PayEstimate.TryParseSalary(lines[9], out salary))
                         salary = 0;
-                    bool autoCheck;
-                    if (lines.Length < 11 || !bool.TryParse(lines[10], out autoCheck)) autoCheck = false;
+                    // Older versions could opt in to checking only.
+                    bool autoUpdate = lines.Length >= 11 && lines[10] == "AutoInstall";
                     return new ClockSettings(new Schedule(start, end), display, lines.Length >= 4 ? lines[3] : "",
-                        transparency, showProgress, notifyAtEnd, theme, pinInside, salary, autoCheck);
+                        transparency, showProgress, notifyAtEnd, theme, pinInside, salary, autoUpdate);
                 }
             }
             catch (IOException) { }
@@ -272,7 +306,7 @@ namespace OffClock
                 settings.Theme.ToString(),
                 settings.PinInside.ToString(),
                 settings.AnnualSalary.ToString(CultureInfo.InvariantCulture),
-                settings.AutoCheckUpdates.ToString()
+                settings.AutoUpdate ? "AutoInstall" : "Off"
             });
             if (File.Exists(path))
                 File.Replace(temporaryPath, path, null);

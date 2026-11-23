@@ -267,7 +267,7 @@ namespace OffClock
         private ReleaseUpdate update;
         private bool busy;
 
-        public UpdateDialog(ReleaseUpdate known, Task<ReleaseUpdate> pending)
+        public UpdateDialog()
         {
             Text = "퇴근시계 업데이트";
             Font = new Font("Malgun Gothic", 9);
@@ -290,9 +290,9 @@ namespace OffClock
                 SetBusy(true);
                 try
                 {
-                    update = known ?? await (pending ?? Task.Run((Func<ReleaseUpdate>)ReleaseUpdate.Check));
+                    update = await Task.Run((Func<ReleaseUpdate>)ReleaseUpdate.Check);
                     status.Text = update == null ? "최신 버전을 사용 중입니다." :
-                        "새 버전 " + update.Tag + "을 사용할 수 있습니다.\r\n설치하면 퇴근시계가 다시 실행됩니다.";
+                        "새 버전 " + update.Tag + "을 사용할 수 있습니다.\r\n설치하면 앱이 다시 실행되며, 저장하지 않은 설정은 사라집니다.";
                 }
                 catch (Exception ex) { status.Text = ex.Message; }
                 finally { SetBusy(false); }

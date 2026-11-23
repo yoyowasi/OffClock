@@ -15,7 +15,7 @@ using Timer = System.Windows.Forms.Timer;
 
 [assembly: System.Reflection.AssemblyTitle("퇴근시계")]
 [assembly: System.Reflection.AssemblyDescription("Windows 작업표시줄 퇴근 카운트다운")]
-[assembly: System.Reflection.AssemblyVersion("1.1.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
 
 namespace OffClock
 {
@@ -92,7 +92,8 @@ namespace OffClock
         private static int Main(string[] args)
         {
             if (args.Length > 0 && args[0] == "--install-update") return ReleaseUpdate.Install(args);
-            if (args.Length == 2 && args[0] == "--clean-update") ReleaseUpdate.CleanAfterInstall(args[1]);
+            bool restartingAfterUpdate = args.Length == 2 && args[0] == "--clean-update";
+            if (restartingAfterUpdate) ReleaseUpdate.CleanAfterInstall(args[1]);
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             bool firstInstance;
@@ -102,7 +103,7 @@ namespace OffClock
 
                 string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                     "OffClock", "schedule.txt");
-                using (var app = new ClockApplication(new SettingsFile(path)))
+                using (var app = new ClockApplication(new SettingsFile(path), restartingAfterUpdate))
                     Application.Run(app);
             }
             return 0;
@@ -121,7 +122,6 @@ namespace OffClock
         private readonly Icon icon;
         private readonly ContextMenuStrip menu = new ContextMenuStrip();
         private readonly NotifyIcon tray;
-        private readonly ToolStripMenuItem updateMenu;
         private ClockSettings settings;
         private ClockSettingsDialog editor;
         private FinishNotice notice;
@@ -129,14 +129,13 @@ namespace OffClock
         private bool refreshOnTick;
         private bool resumePending;
         private DateTime nextUpdateCheck;
-        private Task<ReleaseUpdate> updateCheck;
-        private ReleaseUpdate availableUpdate;
-        private bool updateDialogOpen;
+        private Task<string> automaticUpdate;
 
-        public ClockApplication(SettingsFile store)
+        public ClockApplication(SettingsFile store, bool restartingAfterUpdate)
         {
             this.store = store;
             settings = store.Load();
+            nextUpdateCheck = restartingAfterUpdate ? DateTime.UtcNow.AddHours(6) : DateTime.MinValue;
             using (Graphics screen = Graphics.FromHwnd(IntPtr.Zero))
                 dpi = screen.DpiX / 96f;
 
@@ -150,8 +149,6 @@ namespace OffClock
                 UpdatePlacement();
             };
             menu.Items.Add(visibility);
-            updateMenu = new ToolStripMenuItem("업데이트 확인…", null, delegate { ShowUpdateDialog(); });
-            menu.Items.Add(updateMenu);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("종료", null, delegate { ExitThread(); });
             tray = new NotifyIcon { Icon = icon ?? SystemIcons.Application, ContextMenuStrip = menu };
@@ -209,38 +206,58 @@ namespace OffClock
 
         private void CheckForUpdates()
         {
-            if (updateCheck != null)
+            if (automaticUpdate != null)
             {
-                if (!updateCheck.IsCompleted) return;
-                if (!updateCheck.IsFaulted && !updateCheck.IsCanceled)
+                if (!automaticUpdate.IsCompleted) return;
+                if (automaticUpdate.IsFaulted)
                 {
-                    availableUpdate = updateCheck.Result;
-                    updateMenu.Text = availableUpdate == null ? "업데이트 확인…" :
-                        "업데이트 설치 (" + availableUpdate.Tag + ")…";
+                    System.Diagnostics.Trace.WriteLine(automaticUpdate.Exception.GetBaseException().Message);
+                    automaticUpdate = null;
+                    return;
                 }
-                else if (updateCheck.IsFaulted)
+
+                string stage = automaticUpdate.Result;
+                if (stage != null && settings.AutoUpdate && (editor != null || notice != null)) return;
+                automaticUpdate = null;
+                if (stage == null) return;
+                if (!settings.AutoUpdate)
                 {
-                    System.Diagnostics.Trace.WriteLine(updateCheck.Exception.GetBaseException().Message);
+                    ReleaseUpdate.DeleteStage(stage);
+                    return;
                 }
-                updateCheck = null;
+
+                try
+                {
+                    ReleaseUpdate.StartInstaller(stage);
+                    placement.Stop();
+                    ExitThread();
+                }
+                catch (Exception ex)
+                {
+                    ReleaseUpdate.DeleteStage(stage);
+                    System.Diagnostics.Trace.WriteLine(ex.Message);
+                }
+                return;
             }
 
             DateTime now = DateTime.UtcNow;
-            if (!settings.AutoCheckUpdates || updateDialogOpen || now < nextUpdateCheck) return;
+            if (!settings.AutoUpdate || editor != null || now < nextUpdateCheck) return;
             nextUpdateCheck = now.AddHours(6);
-            updateCheck = Task.Run((Func<ReleaseUpdate>)ReleaseUpdate.Check);
+            automaticUpdate = Task.Run(delegate
+            {
+                ReleaseUpdate release = ReleaseUpdate.Check();
+                return release == null ? null : release.Download();
+            });
         }
 
         private void ShowUpdateDialog()
         {
-            if (updateDialogOpen || editor != null) return;
-            updateDialogOpen = true;
-            try
+            using (var dialog = new UpdateDialog())
             {
-                using (var dialog = new UpdateDialog(availableUpdate, updateCheck))
-                    if (dialog.ShowDialog() == DialogResult.OK) ExitThread();
+                if (dialog.ShowDialog(editor) != DialogResult.OK) return;
             }
-            finally { updateDialogOpen = false; }
+            editor.Close();
+            ExitThread();
         }
 
         private void UpdatePlacement()
@@ -330,13 +347,14 @@ namespace OffClock
                 try
                 {
                     dialog.PreviewAppearance = UpdateAppearance;
+                    dialog.CheckForUpdate = ShowUpdateDialog;
                     dialog.StoreSettings = updated =>
                     {
                         startup.Save(dialog.StartAtLogin, delegate { store.Save(updated); });
                         if (updated.NotifyAtEnd != settings.NotifyAtEnd ||
                             updated.Schedule.Start != settings.Schedule.Start || updated.Schedule.End != settings.Schedule.End)
                             reminder.Reset(DateTime.Now);
-                        if (updated.AutoCheckUpdates && !settings.AutoCheckUpdates) nextUpdateCheck = DateTime.MinValue;
+                        if (updated.AutoUpdate && !settings.AutoUpdate) nextUpdateCheck = DateTime.MinValue;
                         settings = updated;
                         UpdateTrayText();
                         UpdatePlacement();
@@ -380,6 +398,9 @@ namespace OffClock
             {
                 animation.Dispose();
                 placement.Dispose();
+                if (automaticUpdate != null && automaticUpdate.Status == TaskStatus.RanToCompletion &&
+                    automaticUpdate.Result != null)
+                    ReleaseUpdate.DeleteStage(automaticUpdate.Result);
                 tray.Dispose();
                 menu.Dispose();
                 if (notice != null) notice.Dispose();
@@ -683,6 +704,7 @@ namespace OffClock
         private readonly CheckBox startAtLogin;
         public bool StartAtLogin { get { return startAtLogin.Checked; } }
         public Action<ClockSettings> StoreSettings { get; set; }
+        public Action CheckForUpdate { get; set; }
         public Action<int, bool, ClockTheme> PreviewAppearance { get; set; }
         public int SelectedTransparency { get { return transparency.Value; } }
         public bool ShowProgress { get { return progress.Checked; } }
@@ -694,7 +716,7 @@ namespace OffClock
             if (icon != null) Icon = icon;
             AutoScaleDimensions = new SizeF(96, 96);
             AutoScaleMode = AutoScaleMode.Dpi;
-            ClientSize = new Size(324, 547);
+            ClientSize = new Size(324, 586);
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = MinimizeBox = false;
@@ -757,11 +779,30 @@ namespace OffClock
                 Width = 154, MaxLength = 20, TextAlign = HorizontalAlignment.Right, TabIndex = 10,
                 Text = settings.AnnualSalary == 0 ? "" : settings.AnnualSalary.ToString("N0", CultureInfo.InvariantCulture)
             };
+            var salaryInKorean = new Label
+            {
+                Name = "AnnualSalaryInKorean", ForeColor = SystemColors.GrayText, TextAlign = ContentAlignment.TopRight,
+                Location = new Point(18, 424), Size = new Size(286, 36)
+            };
+            EventHandler refreshSalary = delegate
+            {
+                long amount;
+                salaryInKorean.Text = string.IsNullOrWhiteSpace(salary.Text) ? "" :
+                    (PayEstimate.TryParseSalary(salary.Text, out amount) ? PayEstimate.InKorean(amount) : "연봉 숫자를 확인하세요.");
+            };
+            salary.TextChanged += refreshSalary;
+            refreshSalary(salary, EventArgs.Empty);
             var autoUpdates = new CheckBox
             {
-                Name = "AutoUpdates", Text = "새 버전 자동 확인 (GitHub CLI)", Checked = settings.AutoCheckUpdates,
-                AutoSize = true, Location = new Point(18, 432), TabIndex = 11
+                Name = "AutoUpdates", Text = "자동 업데이트", Checked = settings.AutoUpdate,
+                AutoSize = true, Location = new Point(18, 473), TabIndex = 11
             };
+            var checkUpdate = new Button
+            {
+                Name = "CheckForUpdate", Text = "업데이트 확인", Location = new Point(192, 467),
+                Size = new Size(112, 30), TabIndex = 12
+            };
+            checkUpdate.Click += delegate { if (CheckForUpdate != null) CheckForUpdate(); };
             transparency.ValueChanged += delegate
             {
                 percentage.Text = transparency.Value + "%";
@@ -778,12 +819,12 @@ namespace OffClock
                 Name = "Feedback",
                 Text = "퇴근 시간이 출근보다 이르면 다음 날로 계산합니다.",
                 AutoSize = true,
-                Location = new Point(18, 472)
+                Location = new Point(18, 511)
             };
-            var save = new Button { Text = "저장", Location = new Point(225, 506), Size = new Size(79, 28), TabIndex = 13 };
+            var save = new Button { Text = "저장", Location = new Point(225, 545), Size = new Size(79, 28), TabIndex = 14 };
             var cancel = new Button
             {
-                Text = "취소", Location = new Point(138, 506), Size = new Size(79, 28), TabIndex = 12,
+                Text = "취소", Location = new Point(138, 545), Size = new Size(79, 28), TabIndex = 13,
                 DialogResult = DialogResult.Cancel
             };
             save.Click += delegate
@@ -795,7 +836,7 @@ namespace OffClock
             Controls.AddRange(new Control[]
             {
                 start, end, transparencyLabel, transparency, percentage, progress, notify, pinInside, startAtLogin,
-                salaryLabel, salary, autoUpdates, feedback, cancel, save
+                salaryLabel, salary, salaryInKorean, autoUpdates, checkUpdate, feedback, cancel, save
             });
             AcceptButton = save;
             CancelButton = cancel;
@@ -884,8 +925,7 @@ namespace OffClock
             try
             {
                 long salary = 0;
-                if (!string.IsNullOrWhiteSpace(salaryText) && (!long.TryParse(salaryText.Trim(), NumberStyles.AllowThousands,
-                    CultureInfo.InvariantCulture, out salary) || salary < 0 || salary > 999999999999L))
+                if (!string.IsNullOrWhiteSpace(salaryText) && !PayEstimate.TryParseSalary(salaryText, out salary))
                     throw new ArgumentException("세전 연봉을 원 단위 숫자로 입력하세요.");
                 if (display == DisplayMode.Earnings && salary == 0)
                     throw new ArgumentException("오늘 급여를 표시하려면 세전 연봉을 입력하세요.");
