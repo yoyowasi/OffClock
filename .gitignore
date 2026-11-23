@@ -1,0 +1,5 @@
+/outputs/
+/src/compiler-temp/
+/src/OffClock.ico
+*.exe
+*.zip
