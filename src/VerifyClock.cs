@@ -496,10 +496,17 @@ namespace OffClock
         private static void VerifyReleaseCheck()
         {
             const string sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-            string metadata = "{\"tag_name\":\"v1.2.0\",\"assets\":[{\"name\":\"OffClock.zip\",\"digest\":\"sha256:" + sha + "\"}]}";
+            string metadata = "{\"tag_name\":\"v1.2.0\",\"body\":\"- 새로운 기능\\n- 오류 수정\",\"assets\":[{\"name\":\"OffClock.zip\",\"digest\":\"sha256:" + sha + "\"}]}";
             var update = ReleaseUpdate.FromJson(metadata, new Version(1, 1, 0, 0));
             Require(update != null && update.Version == new Version(1, 2, 0, 0) && update.Digest == sha,
                 "A newer release must match the package and include a digest");
+            Require(update.Notes == "- 새로운 기능\n- 오류 수정", "A new release preserves its GitHub notes");
+            using (var dialog = new UpdateDialog(true))
+            {
+                var notes = (TextBox)dialog.Controls["ReleaseNotes"];
+                Require(notes.ReadOnly && notes.Multiline && notes.Text.Contains("변경 내용을 볼 수 있습니다.") &&
+                    notes.Text.Contains("한 번 표시합니다."), "Show bundled release notes after installing");
+            }
             Require(ReleaseUpdate.FromJson(metadata, new Version(1, 2, 0, 0)) == null, "Do not reinstall the same version");
             Require(ReleaseUpdate.FromJson(metadata.Replace("v1.2.0", "v1.0.0"), new Version(1, 1, 0, 0)) == null,
                 "Do not downgrade");

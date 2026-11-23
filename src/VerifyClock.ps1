@@ -8,6 +8,7 @@ $compilerTemp = Join-Path $PSScriptRoot 'compiler-temp'
 New-Item -ItemType Directory -Path $compilerTemp -Force | Out-Null
 $testArguments = @(
     '/nologo', '/codepage:65001', '/warnaserror+', '/main:OffClock.VerifyClock', "/out:$exe",
+    "/resource:$PSScriptRoot\ReleaseNotes.md,OffClock.ReleaseNotes",
     '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll', "/r:$wpf\WindowsBase.dll",
     '/r:System.Web.Extensions.dll', '/r:System.IO.Compression.dll', '/r:System.IO.Compression.FileSystem.dll',
     "/r:$wpf\UIAutomationTypes.dll", "/r:$wpf\UIAutomationClient.dll",

@@ -15,7 +15,7 @@ using Timer = System.Windows.Forms.Timer;
 
 [assembly: System.Reflection.AssemblyTitle("퇴근시계")]
 [assembly: System.Reflection.AssemblyDescription("Windows 작업표시줄 퇴근 카운트다운")]
-[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.0.0")]
 
 namespace OffClock
 {
@@ -92,7 +92,8 @@ namespace OffClock
         private static int Main(string[] args)
         {
             if (args.Length > 0 && args[0] == "--install-update") return ReleaseUpdate.Install(args);
-            bool restartingAfterUpdate = args.Length == 2 && args[0] == "--clean-update";
+            bool restartingAfterUpdate = args.Length >= 2 && args[0] == "--clean-update";
+            bool showReleaseNotes = restartingAfterUpdate && args.Length == 3 && args[2] == "--show-release-notes";
             if (restartingAfterUpdate) ReleaseUpdate.CleanAfterInstall(args[1]);
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -103,7 +104,7 @@ namespace OffClock
 
                 string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                     "OffClock", "schedule.txt");
-                using (var app = new ClockApplication(new SettingsFile(path), restartingAfterUpdate))
+                using (var app = new ClockApplication(new SettingsFile(path), restartingAfterUpdate, showReleaseNotes))
                     Application.Run(app);
             }
             return 0;
@@ -124,6 +125,7 @@ namespace OffClock
         private readonly NotifyIcon tray;
         private ClockSettings settings;
         private ClockSettingsDialog editor;
+        private UpdateDialog installedNotes;
         private FinishNotice notice;
         private bool paused;
         private bool refreshOnTick;
@@ -131,7 +133,7 @@ namespace OffClock
         private DateTime nextUpdateCheck;
         private Task<string> automaticUpdate;
 
-        public ClockApplication(SettingsFile store, bool restartingAfterUpdate)
+        public ClockApplication(SettingsFile store, bool restartingAfterUpdate, bool showReleaseNotes)
         {
             this.store = store;
             settings = store.Load();
@@ -162,6 +164,13 @@ namespace OffClock
             animation.Tick += delegate { UpdateCountdown(); };
             placement.Tick += delegate
             {
+                if (showReleaseNotes)
+                {
+                    showReleaseNotes = false;
+                    installedNotes = new UpdateDialog(true);
+                    installedNotes.FormClosed += delegate { installedNotes = null; };
+                    installedNotes.Show();
+                }
                 bool resumed = resumePending;
                 resumePending = false;
                 refreshOnTick = !refreshOnTick;
@@ -217,7 +226,8 @@ namespace OffClock
                 }
 
                 string stage = automaticUpdate.Result;
-                if (stage != null && settings.AutoUpdate && (editor != null || notice != null)) return;
+                if (stage != null && settings.AutoUpdate &&
+                    (editor != null || notice != null || installedNotes != null)) return;
                 automaticUpdate = null;
                 if (stage == null) return;
                 if (!settings.AutoUpdate)
@@ -403,6 +413,7 @@ namespace OffClock
                     ReleaseUpdate.DeleteStage(automaticUpdate.Result);
                 tray.Dispose();
                 menu.Dispose();
+                if (installedNotes != null) installedNotes.Dispose();
                 if (notice != null) notice.Dispose();
                 foreach (ClockStrip strip in strips.Values) strip.Dispose();
                 if (icon != null) icon.Dispose();

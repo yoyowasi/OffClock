@@ -45,6 +45,7 @@ $wpf = Join-Path $framework 'WPF'
 $arguments = @(
     '/nologo', '/target:winexe', '/codepage:65001', '/optimize+', '/warnaserror+',
     "/out:$OutputPath", "/win32icon:$iconPath", "/win32manifest:$PSScriptRoot\OffClock.manifest",
+    "/resource:$PSScriptRoot\ReleaseNotes.md,OffClock.ReleaseNotes",
     '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll',
     '/r:System.Web.Extensions.dll', '/r:System.IO.Compression.dll', '/r:System.IO.Compression.FileSystem.dll',
     "/r:$wpf\WindowsBase.dll", "/r:$wpf\UIAutomationTypes.dll", "/r:$wpf\UIAutomationClient.dll",

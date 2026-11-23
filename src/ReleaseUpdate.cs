@@ -25,12 +25,14 @@ namespace OffClock
         public readonly string Tag;
         public readonly string Digest;
         public readonly Version Version;
+        public readonly string Notes;
 
-        private ReleaseUpdate(string tag, string digest, Version version)
+        private ReleaseUpdate(string tag, string digest, Version version, string notes)
         {
             Tag = tag;
             Digest = digest;
             Version = version;
+            Notes = notes;
         }
 
         public static ReleaseUpdate Check()
@@ -52,7 +54,7 @@ namespace OffClock
             {
                 if (asset.name == Asset && asset.digest != null &&
                     Regex.IsMatch(asset.digest, @"\Asha256:[0-9a-fA-F]{64}\z"))
-                    return new ReleaseUpdate(data.tag_name, asset.digest.Substring(7), version);
+                    return new ReleaseUpdate(data.tag_name, asset.digest.Substring(7), version, data.body);
             }
             throw new InvalidDataException("릴리스에서 설치 파일 또는 검증 정보를 찾을 수 없습니다.");
         }
@@ -138,7 +140,7 @@ namespace OffClock
                 File.Copy(source, staged);
                 File.Replace(staged, target, backup);
                 replaced = true;
-                using (var restarted = Launch(target, "--clean-update " + id))
+                using (var restarted = Launch(target, "--clean-update " + id + " --show-release-notes"))
                     if (restarted.WaitForExit(1200))
                         throw new InvalidOperationException("The updated app exited during startup.");
                 TryDelete(backup);
@@ -164,6 +166,15 @@ namespace OffClock
             AssemblyName identity = AssemblyName.GetAssemblyName(exe);
             if (identity.Name != "OffClock") throw new InvalidDataException("퇴근시계 실행 파일이 아닙니다.");
             return identity.Version;
+        }
+
+        internal static string InstalledNotes()
+        {
+            using (var stream = typeof(ReleaseUpdate).Assembly.GetManifestResourceStream("OffClock.ReleaseNotes"))
+            {
+                if (stream == null) return null;
+                using (var reader = new StreamReader(stream)) return reader.ReadToEnd();
+            }
         }
 
         public static void CleanAfterInstall(string id)
@@ -246,6 +257,7 @@ namespace OffClock
         {
             public ReleaseData() { }
             public string tag_name { get; set; }
+            public string body { get; set; }
             public bool draft { get; set; }
             public bool prerelease { get; set; }
             public ReleaseAsset[] assets { get; set; }
@@ -262,28 +274,45 @@ namespace OffClock
     internal sealed class UpdateDialog : Form
     {
         private readonly Label status;
+        private readonly TextBox notes;
         private readonly Button install;
         private readonly Button close;
         private ReleaseUpdate update;
         private bool busy;
 
-        public UpdateDialog()
+        public UpdateDialog(bool installed = false)
         {
-            Text = "퇴근시계 업데이트";
+            Text = installed ? "퇴근시계 릴리스 노트" : "퇴근시계 업데이트";
             Font = new Font("Malgun Gothic", 9);
             AutoScaleMode = AutoScaleMode.Font;
-            ClientSize = new Size(348, 146);
+            ClientSize = new Size(462, 318);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             StartPosition = FormStartPosition.CenterScreen;
             MinimizeBox = MaximizeBox = false;
             ShowInTaskbar = false;
             TopMost = true;
-            status = new Label { Location = new Point(18, 16), Size = new Size(312, 75) };
-            install = new Button { Text = "지금 설치", Location = new Point(239, 101), Size = new Size(91, 29), Enabled = false };
-            close = new Button { Text = "닫기", Location = new Point(140, 101), Size = new Size(91, 29), DialogResult = DialogResult.Cancel };
-            Controls.AddRange(new Control[] { status, close, install });
-            AcceptButton = install;
+            status = new Label { Location = new Point(18, 16), Size = new Size(426, 54) };
+            notes = new TextBox
+            {
+                Name = "ReleaseNotes", AccessibleName = "변경 내용", Multiline = true, ReadOnly = true,
+                Location = new Point(18, 76), Size = new Size(426, 182), ScrollBars = ScrollBars.Vertical
+            };
+            install = new Button { Text = "지금 설치", Location = new Point(353, 273), Size = new Size(91, 29), Enabled = false };
+            close = new Button { Text = "닫기", Location = new Point(installed ? 353 : 254, 273), Size = new Size(91, 29), DialogResult = DialogResult.Cancel };
+            Controls.AddRange(new Control[] { status, notes, close });
             CancelButton = close;
+            if (installed)
+            {
+                status.Text = "v" + typeof(ReleaseUpdate).Assembly.GetName().Version.ToString(3) + " 설치 완료 · 변경 내용";
+                ShowNotes(ReleaseUpdate.InstalledNotes());
+                close.Click += delegate { Close(); };
+                AcceptButton = close;
+                ActiveControl = close;
+                install.Dispose();
+                return;
+            }
+            Controls.Add(install);
+            AcceptButton = install;
             Shown += async delegate
             {
                 status.Text = "GitHub에서 업데이트를 확인하는 중입니다.";
@@ -293,6 +322,7 @@ namespace OffClock
                     update = await Task.Run((Func<ReleaseUpdate>)ReleaseUpdate.Check);
                     status.Text = update == null ? "최신 버전을 사용 중입니다." :
                         "새 버전 " + update.Tag + "을 사용할 수 있습니다.\r\n설치하면 앱이 다시 실행되며, 저장하지 않은 설정은 사라집니다.";
+                    if (update != null) ShowNotes(update.Notes);
                 }
                 catch (Exception ex) { status.Text = ex.Message; }
                 finally { SetBusy(false); }
@@ -320,6 +350,12 @@ namespace OffClock
             {
                 if (busy && e.CloseReason == CloseReason.UserClosing) e.Cancel = true;
             };
+        }
+
+        private void ShowNotes(string text)
+        {
+            notes.Text = string.IsNullOrWhiteSpace(text) ? "등록된 변경 내용이 없습니다." :
+                text.Trim().Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", Environment.NewLine);
         }
 
         private void SetBusy(bool value)
