@@ -261,9 +261,11 @@ namespace OffClock
             }
             if (executable == null) throw new InvalidOperationException("GitHub CLI(gh)를 설치하고 로그인하세요.");
 
+            // gh writes UTF-8; without this a window app reads it as the ANSI code page (CP949 on Korean Windows).
             var start = new ProcessStartInfo(executable, arguments)
             {
-                UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true
+                UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true,
+                StandardOutputEncoding = new System.Text.UTF8Encoding(false)
             };
             start.EnvironmentVariables["GH_PROMPT_DISABLED"] = "1";
             using (var process = Process.Start(start))
