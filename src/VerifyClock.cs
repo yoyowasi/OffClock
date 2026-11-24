@@ -20,6 +20,7 @@ namespace OffClock
                 VerifySchedule();
                 VerifyPayEstimate();
                 VerifyReleaseCheck();
+                VerifyUpdateFailure(args[0]);
                 VerifySettings(args[0]);
                 VerifyLoginStartup(args[0]);
                 VerifyMonitorSelection();
@@ -27,6 +28,8 @@ namespace OffClock
                 VerifyPowerResume();
                 VerifyColors();
                 VerifyAppearance();
+                VerifyThemes();
+                VerifyProgressColor(args[0]);
                 VerifyFinishReminder();
                 VerifyFinishNotice();
                 Console.WriteLine("Verified countdown, settings, placement, power-resume messages, appearance, and silent notifications.");
@@ -187,8 +190,13 @@ namespace OffClock
                     Require(transparency.Minimum == 0 && transparency.Maximum == 70 && transparency.Value == 0 &&
                         showProgress.Checked && !notifyAtEnd.Checked && theme.SelectedIndex == (int)ClockTheme.Dark,
                         "Default appearance controls");
-                    var previewChanges = new List<Tuple<int, bool, ClockTheme>>();
-                    dialog.PreviewAppearance = (value, visible, selected) => previewChanges.Add(Tuple.Create(value, visible, selected));
+                    string[] themeLabels = { "다크", "라이트", "벚꽃", "바다", "숲", "노을", "고양이", "곰", "토끼", "펭귄", "병아리" };
+                    Require(theme.Items.Count == themeLabels.Length, "Theme combo must list every theme");
+                    for (int i = 0; i < themeLabels.Length; i++)
+                        Require(theme.Items[i].ToString() == themeLabels[i], "Theme label " + i);
+                    var previewChanges = new List<Tuple<int, bool, ClockTheme, int>>();
+                    dialog.PreviewAppearance = (value, visible, selected, barColor) =>
+                        previewChanges.Add(Tuple.Create(value, visible, selected, barColor.ToArgb()));
                     dialog.StoreSettings = store.Save;
                     dialog.Shown += delegate
                     {
@@ -214,8 +222,9 @@ namespace OffClock
                     Require(dialog.ShowDialog() == DialogResult.OK, "Save did not close settings");
                     Require(previewChanges.SequenceEqual(new[]
                     {
-                        Tuple.Create(70, true, ClockTheme.Dark), Tuple.Create(70, false, ClockTheme.Dark),
-                        Tuple.Create(70, false, ClockTheme.Light)
+                        Tuple.Create(70, true, ClockTheme.Dark, Color.Empty.ToArgb()),
+                        Tuple.Create(70, false, ClockTheme.Dark, Color.Empty.ToArgb()),
+                        Tuple.Create(70, false, ClockTheme.Light, Color.Empty.ToArgb())
                     }), "Transparency, progress and theme must preview their values");
                 }
                 ClockSettings saved = store.Load();
@@ -227,14 +236,31 @@ namespace OffClock
                     "Saved appearance or reminder settings were lost");
 
                 string[] savedLines = File.ReadAllLines(path);
-                Require(savedLines.Length == 11 && savedLines[0] == "09:20" && savedLines[1] == "18:30" &&
-                    savedLines[2] == "Earnings" && savedLines[3] == target.DeviceName,
-                    "Existing settings fields must keep their positions");
+                Require(savedLines.Length == 12 && savedLines[0] == "09:20" && savedLines[1] == "18:30" &&
+                    savedLines[2] == "Earnings" && savedLines[3] == target.DeviceName && savedLines[11] == "Theme",
+                    "Existing settings fields must keep their positions and line 11 must default to Theme");
                 string savedUpdateMode = savedLines[10];
                 savedLines[10] = "True";
                 File.WriteAllLines(path, savedLines);
                 Require(!store.Load().AutoUpdate, "Old check-only preference must not opt in to installation");
                 savedLines[10] = savedUpdateMode;
+                File.WriteAllLines(path, savedLines);
+
+                File.WriteAllLines(path, savedLines.Take(11));
+                RequireSameExceptColor(store.Load(), saved, "Eleven-line settings");
+                foreach (string badColor in new[] { "#ZZZ", "red" })
+                {
+                    savedLines[11] = badColor;
+                    File.WriteAllLines(path, savedLines);
+                    RequireSameExceptColor(store.Load(), saved, "Malformed progress color " + badColor);
+                }
+                savedLines[11] = "#123456";
+                File.WriteAllLines(path, savedLines);
+                ClockSettings coloredSettings = store.Load();
+                Require(coloredSettings.ProgressColor.ToArgb() == Color.FromArgb(255, 18, 52, 86).ToArgb() &&
+                    coloredSettings.Theme == ClockTheme.Light && coloredSettings.Transparency == 70,
+                    "A hex progress color must load as an opaque color without disturbing other fields");
+                savedLines[11] = "Theme";
                 File.WriteAllLines(path, savedLines);
                 using (var dialog = new ClockSettingsDialog(saved, null))
                 {
@@ -266,8 +292,261 @@ namespace OffClock
         private static void RequireDefaultAppearance(ClockSettings settings, string scenario)
         {
             Require(settings.Transparency == 0 && settings.ShowProgress && !settings.NotifyAtEnd &&
-                settings.Theme == ClockTheme.Dark,
+                settings.Theme == ClockTheme.Dark && settings.ProgressColor.IsEmpty,
                 scenario + " should use default appearance and reminder settings");
+        }
+
+        private static void RequireSameExceptColor(ClockSettings actual, ClockSettings expected, string scenario)
+        {
+            Require(actual.ProgressColor.IsEmpty, scenario + " must load an empty progress color");
+            Require(actual.Schedule.Start == expected.Schedule.Start && actual.Schedule.End == expected.Schedule.End &&
+                actual.Display == expected.Display && actual.Monitor == expected.Monitor &&
+                actual.AnnualSalary == expected.AnnualSalary && actual.AutoUpdate == expected.AutoUpdate &&
+                actual.Transparency == expected.Transparency && actual.ShowProgress == expected.ShowProgress &&
+                actual.NotifyAtEnd == expected.NotifyAtEnd && actual.Theme == expected.Theme,
+                scenario + " must not disturb the other settings");
+        }
+
+        private static Color Accent(ClockPalette palette, TimeSpan remaining)
+        {
+            if (remaining > TimeSpan.Zero && remaining <= TimeSpan.FromMinutes(10)) return palette.Urgent;
+            if (remaining > TimeSpan.Zero && remaining <= TimeSpan.FromMinutes(30)) return palette.Soon;
+            return palette.Normal;
+        }
+
+        private static void VerifyThemes()
+        {
+            var themes = (ClockTheme[])Enum.GetValues(typeof(ClockTheme));
+            Require(themes.Length == 11 && (int)ClockTheme.Dark == 0 && (int)ClockTheme.Light == 1 &&
+                (int)ClockTheme.Sakura == 2 && (int)ClockTheme.Cat == 6 && (int)ClockTheme.Chick == 10,
+                "Theme enum order");
+            ClockPalette dark = ClockPalette.For(ClockTheme.Dark);
+            ClockPalette light = ClockPalette.For(ClockTheme.Light);
+            Require(dark.Background.ToArgb() == Color.FromArgb(26, 32, 43).ToArgb() &&
+                dark.Track.ToArgb() == Color.FromArgb(60, 72, 90).ToArgb() &&
+                dark.Normal.ToArgb() == Color.FromArgb(123, 232, 184).ToArgb() &&
+                dark.Soon.ToArgb() == Color.FromArgb(255, 194, 134).ToArgb() &&
+                dark.Urgent.ToArgb() == Color.FromArgb(255, 106, 112).ToArgb(), "Dark palette is unchanged");
+            Require(light.Background.ToArgb() == Color.FromArgb(246, 248, 251).ToArgb() &&
+                light.Urgent.ToArgb() == Color.FromArgb(181, 30, 54).ToArgb(), "Light palette is unchanged");
+
+            var characters = new[] { ClockTheme.Cat, ClockTheme.Bear, ClockTheme.Rabbit, ClockTheme.Penguin, ClockTheme.Chick };
+            var backgrounds = new HashSet<int>();
+            Color custom = Color.FromArgb(18, 52, 86);
+            var states = new[]
+            {
+                TimeSpan.FromMinutes(90), TimeSpan.FromMinutes(30), TimeSpan.FromMinutes(10), TimeSpan.Zero
+            };
+            using (var strip = new ClockStrip(1))
+            using (var bitmap = new Bitmap(strip.Width, strip.Height))
+            using (var running = new Bitmap(strip.Width, strip.Height))
+            using (var finished = new Bitmap(strip.Width, strip.Height))
+            {
+                foreach (ClockTheme theme in themes)
+                {
+                    ClockPalette palette = ClockPalette.For(theme);
+                    Require(backgrounds.Add(palette.Background.ToArgb()), theme + " must have its own background");
+
+                    strip.SetAppearance(0, true, theme);
+                    foreach (TimeSpan remaining in states)
+                    {
+                        strip.Display(new Countdown(remaining, 0.75), DisplayMode.Clock);
+                        strip.DrawToBitmap(bitmap, strip.ClientRectangle);
+                        Require(bitmap.GetPixel(47, 4).ToArgb() == palette.Background.ToArgb(), theme + " background at " + remaining);
+                        Require(bitmap.GetPixel(210, 28).ToArgb() == palette.Track.ToArgb(), theme + " rail at " + remaining);
+                        Require(bitmap.GetPixel(20, 28).ToArgb() == Accent(palette, remaining).ToArgb(),
+                            theme + " state accent at " + remaining);
+                    }
+
+                    strip.SetAppearance(0, true, theme, custom);
+                    foreach (TimeSpan remaining in states)
+                    {
+                        strip.Display(new Countdown(remaining, 0.75), DisplayMode.Clock);
+                        strip.DrawToBitmap(bitmap, strip.ClientRectangle);
+                        Require(bitmap.GetPixel(20, 28).ToArgb() == Color.FromArgb(255, 18, 52, 86).ToArgb(),
+                            theme + " custom fill at " + remaining);
+                        Require(bitmap.GetPixel(210, 28).ToArgb() == palette.Track.ToArgb(),
+                            theme + " custom rail at " + remaining);
+                        Require(bitmap.GetPixel(47, 4).ToArgb() == palette.Background.ToArgb(),
+                            theme + " custom background at " + remaining);
+                    }
+                    strip.SetAppearance(0, true, theme, Color.Empty);
+                    strip.Display(new Countdown(TimeSpan.FromMinutes(10), 0.75), DisplayMode.Clock);
+                    strip.DrawToBitmap(bitmap, strip.ClientRectangle);
+                    Require(bitmap.GetPixel(20, 28).ToArgb() == palette.Urgent.ToArgb(),
+                        theme + " must return to the state accent when the custom color is cleared");
+
+                    strip.Display(new Countdown(TimeSpan.FromHours(1), 0.75), DisplayMode.Clock);
+                    strip.DrawToBitmap(running, strip.ClientRectangle);
+                    strip.Display(new Countdown(TimeSpan.Zero, 1), DisplayMode.Clock);
+                    strip.DrawToBitmap(finished, strip.ClientRectangle);
+                    int different = 0, drawn = 0;
+                    for (int x = 6; x <= 28; x++)
+                        for (int y = 2; y <= 24; y++)
+                        {
+                            if (running.GetPixel(x, y).ToArgb() != finished.GetPixel(x, y).ToArgb()) different++;
+                            if (running.GetPixel(x, y).ToArgb() != palette.Background.ToArgb()) drawn++;
+                        }
+                    Require(different > 0, theme + " icon must look different when finished");
+                    if (Array.IndexOf(characters, theme) >= 0)
+                    {
+                        Require(drawn > 0, theme + " must draw a mascot in the icon area");
+                        VerifyMascotStages(strip, theme);
+                    }
+                }
+            }
+        }
+
+        private static void VerifyMascotStages(ClockStrip strip, ClockTheme theme)
+        {
+            strip.SetAppearance(0, true, theme);
+            var remainings = new[]
+            {
+                TimeSpan.FromHours(1), TimeSpan.FromMinutes(25), TimeSpan.FromMinutes(5), TimeSpan.Zero
+            };
+            var names = new[] { "calm", "blush", "sweat", "finished" };
+            var renders = new List<int[]>();
+            var sweatFound = new bool[remainings.Length];
+            using (var bitmap = new Bitmap(strip.Width, strip.Height))
+            {
+                for (int stage = 0; stage < remainings.Length; stage++)
+                {
+                    double progress = remainings[stage] == TimeSpan.Zero ? 1 : 0.75;
+                    strip.Display(new Countdown(remainings[stage], progress), DisplayMode.Clock);
+                    strip.DrawToBitmap(bitmap, strip.ClientRectangle);
+                    var pixels = new List<int>();
+                    for (int x = 6; x <= 28; x++)
+                        for (int y = 2; y <= 24; y++)
+                            pixels.Add(bitmap.GetPixel(x, y).ToArgb());
+                    renders.Add(pixels.ToArray());
+                    for (int x = 23; x <= 28; x++)
+                        for (int y = 7; y <= 13; y++)
+                        {
+                            Color pixel = bitmap.GetPixel(x, y);
+                            if (Math.Abs(pixel.R - 91) <= 12 && Math.Abs(pixel.G - 184) <= 12 && Math.Abs(pixel.B - 245) <= 12)
+                                sweatFound[stage] = true;
+                        }
+                }
+            }
+            for (int a = 0; a < renders.Count; a++)
+                for (int b = a + 1; b < renders.Count; b++)
+                    Require(!renders[a].SequenceEqual(renders[b]),
+                        theme + " mascot must differ between " + names[a] + " and " + names[b]);
+            Require(!sweatFound[0] && !sweatFound[1] && sweatFound[2],
+                theme + " sweat drop must appear only in the last ten minutes");
+        }
+
+        private static void VerifyProgressColor(string folder)
+        {
+            string path = Path.Combine(folder, Guid.NewGuid().ToString("N") + ".txt");
+            var store = new SettingsFile(path);
+            Color custom = Color.FromArgb(18, 52, 86);
+            int customArgb = Color.FromArgb(255, 18, 52, 86).ToArgb();
+            int rabbitNormal = ClockPalette.For(ClockTheme.Rabbit).Normal.ToArgb();
+            try
+            {
+                var previews = new List<Tuple<int, bool, ClockTheme, int>>();
+                Color requested = Color.Empty;
+                using (var dialog = new ClockSettingsDialog(ClockSettings.Default, null))
+                {
+                    var theme = (ComboBox)dialog.Controls["Theme"];
+                    var showProgress = (CheckBox)dialog.Controls["ShowProgress"];
+                    var pick = (Button)dialog.Controls["ProgressColor"];
+                    var reset = (Button)dialog.Controls["ResetProgressColor"];
+                    var swatch = (Label)dialog.Controls["ProgressColorSwatch"];
+                    Require(pick.Text == "색 변경" && reset.Text == "기본값", "Progress color button labels");
+                    Require(dialog.SelectedProgressColor.IsEmpty && pick.Enabled && !reset.Enabled &&
+                        swatch.BackColor.ToArgb() == ClockPalette.For(ClockTheme.Dark).Normal.ToArgb(),
+                        "Default progress color state");
+                    dialog.PreviewAppearance = (value, visible, selected, barColor) =>
+                        previews.Add(Tuple.Create(value, visible, selected, barColor.ToArgb()));
+                    dialog.StoreSettings = store.Save;
+                    dialog.Shown += delegate
+                    {
+                        theme.SelectedIndex = (int)ClockTheme.Rabbit;
+                        Require(previews.Count == 1 && swatch.BackColor.ToArgb() == rabbitNormal,
+                            "Swatch follows the theme while no custom color is set");
+
+                        dialog.PickProgressColor = delegate(Color shown) { requested = shown; return null; };
+                        pick.PerformClick();
+                        Require(requested.ToArgb() == rabbitNormal && previews.Count == 1 &&
+                            dialog.SelectedProgressColor.IsEmpty && swatch.BackColor.ToArgb() == rabbitNormal,
+                            "Cancelling the picker must change nothing and fire no preview");
+
+                        dialog.PickProgressColor = delegate(Color shown) { requested = shown; return custom; };
+                        pick.PerformClick();
+                        Require(requested.ToArgb() == rabbitNormal && previews.Count == 2 &&
+                            dialog.SelectedProgressColor.ToArgb() == customArgb && swatch.BackColor.ToArgb() == customArgb &&
+                            reset.Enabled &&
+                            previews[1].Equals(Tuple.Create(0, true, ClockTheme.Rabbit, customArgb)),
+                            "Picking a color must update the swatch and preview it");
+
+                        theme.SelectedIndex = (int)ClockTheme.Penguin;
+                        Require(previews.Count == 3 && swatch.BackColor.ToArgb() == customArgb &&
+                            previews[2].Equals(Tuple.Create(0, true, ClockTheme.Penguin, customArgb)),
+                            "A custom color must survive a theme change");
+                        theme.SelectedIndex = (int)ClockTheme.Rabbit;
+
+                        showProgress.Checked = false;
+                        Require(!pick.Enabled && !reset.Enabled, "Color buttons are disabled while the progress bar is hidden");
+                        showProgress.Checked = true;
+                        Require(pick.Enabled && reset.Enabled, "Color buttons return with the progress bar");
+                        dialog.AcceptButton.PerformClick();
+                    };
+                    Require(dialog.ShowDialog() == DialogResult.OK, "Save did not close settings");
+                }
+                string[] lines = File.ReadAllLines(path);
+                Require(lines.Length == 12 && lines[11] == "#123456", "Custom progress color must be saved as #RRGGBB");
+                ClockSettings saved = store.Load();
+                Require(saved.Theme == ClockTheme.Rabbit && saved.ProgressColor.ToArgb() == customArgb,
+                    "Character theme and custom color must round trip");
+
+                bool storeCalled = false;
+                var secondPreviews = new List<Tuple<int, bool, ClockTheme, int>>();
+                using (var dialog = new ClockSettingsDialog(saved, null))
+                {
+                    var theme = (ComboBox)dialog.Controls["Theme"];
+                    var showProgress = (CheckBox)dialog.Controls["ShowProgress"];
+                    var pick = (Button)dialog.Controls["ProgressColor"];
+                    var reset = (Button)dialog.Controls["ResetProgressColor"];
+                    var swatch = (Label)dialog.Controls["ProgressColorSwatch"];
+                    Require(theme.SelectedIndex == (int)ClockTheme.Rabbit && swatch.BackColor.ToArgb() == customArgb &&
+                        dialog.SelectedProgressColor.ToArgb() == customArgb, "Reopening must show the saved color");
+                    dialog.PreviewAppearance = (value, visible, selected, barColor) =>
+                        secondPreviews.Add(Tuple.Create(value, visible, selected, barColor.ToArgb()));
+                    dialog.StoreSettings = delegate { storeCalled = true; };
+                    dialog.Shown += delegate
+                    {
+                        Require(pick.Enabled && reset.Enabled, "Saved custom color enables both buttons");
+                        reset.PerformClick();
+                        Require(dialog.SelectedProgressColor.IsEmpty && swatch.BackColor.ToArgb() == rabbitNormal &&
+                            !reset.Enabled && secondPreviews.Count == 1 &&
+                            secondPreviews[0].Equals(Tuple.Create(0, true, ClockTheme.Rabbit, Color.Empty.ToArgb())),
+                            "Reset must return to the theme color and preview it");
+                        showProgress.Checked = false;
+                        Require(!pick.Enabled && !reset.Enabled, "Buttons disabled while progress is hidden");
+                        dialog.CancelButton.PerformClick();
+                    };
+                    Require(dialog.ShowDialog() == DialogResult.Cancel && !storeCalled, "Cancel must not store anything");
+                }
+                Require(store.Load().ProgressColor.ToArgb() == customArgb && File.ReadAllLines(path)[11] == "#123456",
+                    "Cancel must keep the saved progress color");
+
+                using (var dialog = new ClockSettingsDialog(saved, null))
+                {
+                    var reset = (Button)dialog.Controls["ResetProgressColor"];
+                    dialog.StoreSettings = store.Save;
+                    dialog.Shown += delegate
+                    {
+                        reset.PerformClick();
+                        dialog.AcceptButton.PerformClick();
+                    };
+                    Require(dialog.ShowDialog() == DialogResult.OK, "Save after reset did not close settings");
+                }
+                Require(store.Load().ProgressColor.IsEmpty && File.ReadAllLines(path)[11] == "Theme" &&
+                    store.Load().Theme == ClockTheme.Rabbit, "Reset then Save must store the theme default");
+            }
+            finally { File.Delete(path); }
         }
 
         private static Screen FirstSecondary()
@@ -504,8 +783,8 @@ namespace OffClock
             using (var dialog = new UpdateDialog(true))
             {
                 var notes = (TextBox)dialog.Controls["ReleaseNotes"];
-                Require(notes.ReadOnly && notes.Multiline && notes.Text.Contains("변경 내용을 볼 수 있습니다.") &&
-                    notes.Text.Contains("한 번 표시합니다."), "Show bundled release notes after installing");
+                Require(notes.ReadOnly && notes.Multiline && notes.Text.Contains("캐릭터 테마") &&
+                    notes.Text.Contains("진행 막대 색"), "Show bundled release notes after installing");
             }
             Require(ReleaseUpdate.FromJson(metadata, new Version(1, 2, 0, 0)) == null, "Do not reinstall the same version");
             Require(ReleaseUpdate.FromJson(metadata.Replace("v1.2.0", "v1.0.0"), new Version(1, 1, 0, 0)) == null,
@@ -516,6 +795,78 @@ namespace OffClock
                 throw new InvalidOperationException("Accepted an invalid update digest");
             }
             catch (InvalidDataException) { }
+        }
+
+        private static void VerifyUpdateFailure(string folder)
+        {
+            string root = Path.Combine(folder, "failure-" + Guid.NewGuid().ToString("N"));
+            string path = Path.Combine(root, "update-failed.txt");
+            string nested = Path.Combine(Path.Combine(Path.Combine(root, "a"), "b"), "update-failed.txt");
+            var version = new Version(1, 3, 0, 0);
+            try
+            {
+                Require(UpdateFailure.Load(path) == null, "A missing record must load as null");
+                UpdateFailure.Clear(path);
+
+                UpdateFailure.Record(path, version, "다운로드 실패");
+                UpdateFailure loaded = UpdateFailure.Load(path);
+                Require(loaded != null && loaded.Version == version && loaded.Reason == "다운로드 실패",
+                    "Single-line failure must round trip");
+
+                string multiLine = "첫 줄" + Environment.NewLine + "둘째 줄" + Environment.NewLine + "셋째 줄";
+                UpdateFailure.Record(path, new Version(1, 4, 0, 0), multiLine);
+                loaded = UpdateFailure.Load(path);
+                Require(loaded != null && loaded.Version == new Version(1, 4, 0, 0) && loaded.Reason == multiLine,
+                    "A newer record must overwrite the older one and keep a multi-line reason");
+
+                UpdateFailure.Record(path, version, null);
+                loaded = UpdateFailure.Load(path);
+                Require(loaded != null && loaded.Version == version && loaded.Reason == "", "A null reason must load as empty");
+
+                Require(loaded.IsFor(new Version(1, 3, 0, 0)) && !loaded.IsFor(new Version(1, 3, 1, 0)) &&
+                    !loaded.IsFor(new Version(1, 4, 0, 0)) && !loaded.IsFor(new Version(1, 2, 0, 0)),
+                    "A failure must only match its own version");
+
+                File.WriteAllText(path, "abc" + Environment.NewLine + "reason");
+                Require(UpdateFailure.Load(path) == null, "A garbage version line must load as null");
+                File.WriteAllText(path, "");
+                Require(UpdateFailure.Load(path) == null, "An empty record must load as null");
+
+                UpdateFailure.Record(nested, version, "중첩 폴더");
+                loaded = UpdateFailure.Load(nested);
+                Require(loaded != null && loaded.Version == version && loaded.Reason == "중첩 폴더",
+                    "Record must create missing folders");
+
+                UpdateFailure.Record(path, version, "삭제 대상");
+                UpdateFailure.Clear(path);
+                Require(!File.Exists(path) && UpdateFailure.Load(path) == null, "Clear must remove the record");
+                UpdateFailure.Clear(path);
+                UpdateFailure.Clear(Path.Combine(Path.Combine(root, "missing-folder"), "update-failed.txt"));
+
+                UpdateFailure.Record(path, version, "서버 오류" + Environment.NewLine + "세부 내용");
+                UpdateFailure failure = UpdateFailure.Load(path);
+                Require(failure != null, "The dialog failure must load from a recorded file");
+                using (var dialog = new UpdateDialog(failure))
+                {
+                    var status = (Label)dialog.Controls["Status"];
+                    var notes = (TextBox)dialog.Controls["ReleaseNotes"];
+                    Require(dialog.Text == "퇴근시계 업데이트 실패", "Failure dialog title");
+                    Require(status.Text.Contains("v1.3.0") && status.Text.Contains("설치하지 못했습니다"),
+                        "Failure dialog must name the version and the failure");
+                    Require(notes.ReadOnly && notes.Multiline && notes.Text.Contains("서버 오류") &&
+                        notes.Text.Contains("세부 내용") && notes.Text.Contains("업데이트 확인"),
+                        "Failure dialog must show the reason and how to retry");
+                    var buttons = dialog.Controls.OfType<Button>().ToList();
+                    Require(buttons.All(button => button.Text != "지금 설치") && buttons.Any(button => button.Text == "닫기"),
+                        "Failure dialog must offer only close");
+                }
+                using (var dialog = new UpdateDialog(true))
+                    Require(dialog.Controls["Status"] is Label, "Every update dialog mode must name its status label");
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, true);
+            }
         }
 
         [DllImport("user32.dll", EntryPoint = "SendMessageW")]

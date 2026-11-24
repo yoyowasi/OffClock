@@ -12,7 +12,7 @@ $testArguments = @(
     '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll', "/r:$wpf\WindowsBase.dll",
     '/r:System.Web.Extensions.dll', '/r:System.IO.Compression.dll', '/r:System.IO.Compression.FileSystem.dll',
     "/r:$wpf\UIAutomationTypes.dll", "/r:$wpf\UIAutomationClient.dll",
-    "$PSScriptRoot\VerifyClock.cs", "$PSScriptRoot\App.cs", "$PSScriptRoot\Clock.cs", "$PSScriptRoot\Taskbar.cs",
+    "$PSScriptRoot\VerifyClock.cs", "$PSScriptRoot\App.cs", "$PSScriptRoot\Clock.cs", "$PSScriptRoot\Theme.cs", "$PSScriptRoot\Taskbar.cs",
     "$PSScriptRoot\ReleaseUpdate.cs"
 )
 try {

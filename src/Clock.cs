@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Security;
@@ -7,10 +8,20 @@ using System.Text;
 
 namespace OffClock
 {
+    // Saved by name, and the settings combo uses the index: only append.
     internal enum ClockTheme
     {
         Dark,
-        Light
+        Light,
+        Sakura,
+        Ocean,
+        Forest,
+        Sunset,
+        Cat,
+        Bear,
+        Rabbit,
+        Penguin,
+        Chick
     }
 
     internal enum DisplayMode
@@ -40,10 +51,12 @@ namespace OffClock
         public readonly bool PinInside;
         public readonly long AnnualSalary;
         public readonly bool AutoUpdate;
+        // Empty: the bar follows the theme's state color.
+        public readonly Color ProgressColor;
 
         public ClockSettings(Schedule schedule, DisplayMode display, string monitor = "",
             int transparency = 0, bool showProgress = true, bool notifyAtEnd = false, ClockTheme theme = ClockTheme.Dark,
-            bool pinInside = true, long annualSalary = 0, bool autoUpdate = false)
+            bool pinInside = true, long annualSalary = 0, bool autoUpdate = false, Color progressColor = default(Color))
         {
             Schedule = schedule;
             Display = display == DisplayMode.Earnings && annualSalary <= 0 ? DisplayMode.Clock : display;
@@ -55,6 +68,31 @@ namespace OffClock
             PinInside = pinInside;
             AnnualSalary = Math.Max(0, annualSalary);
             AutoUpdate = autoUpdate;
+            ProgressColor = BarColor.Opaque(progressColor);
+        }
+    }
+
+    internal static class BarColor
+    {
+        private const string ThemeDefault = "Theme";
+
+        public static Color Opaque(Color color)
+        {
+            return color.IsEmpty ? Color.Empty : Color.FromArgb(255, color.R, color.G, color.B);
+        }
+
+        public static string Format(Color color)
+        {
+            return color.IsEmpty ? ThemeDefault : "#" + (color.ToArgb() & 0xFFFFFF).ToString("X6", CultureInfo.InvariantCulture);
+        }
+
+        public static Color Parse(string text)
+        {
+            int rgb;
+            if (text == null || text.Length != 7 || text[0] != '#' ||
+                !int.TryParse(text.Substring(1), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out rgb))
+                return Color.Empty;
+            return Color.FromArgb(unchecked((int)0xFF000000) | rgb);
         }
     }
 
@@ -176,11 +214,30 @@ namespace OffClock
         }
     }
 
+    internal enum CountdownStage
+    {
+        Running,
+        Soon,
+        Urgent,
+        Finished
+    }
+
     internal struct Countdown
     {
         public readonly TimeSpan Remaining;
         public readonly double Progress;
         public bool Finished { get { return Remaining == TimeSpan.Zero; } }
+
+        public CountdownStage Stage
+        {
+            get
+            {
+                if (Finished) return CountdownStage.Finished;
+                if (Remaining <= TimeSpan.FromMinutes(10)) return CountdownStage.Urgent;
+                if (Remaining <= TimeSpan.FromMinutes(30)) return CountdownStage.Soon;
+                return CountdownStage.Running;
+            }
+        }
 
         public Countdown(TimeSpan remaining, double progress)
         {
@@ -279,8 +336,9 @@ namespace OffClock
                         salary = 0;
                     // Older versions could opt in to checking only.
                     bool autoUpdate = lines.Length >= 11 && lines[10] == "AutoInstall";
+                    Color progressColor = lines.Length >= 12 ? BarColor.Parse(lines[11]) : Color.Empty;
                     return new ClockSettings(new Schedule(start, end), display, lines.Length >= 4 ? lines[3] : "",
-                        transparency, showProgress, notifyAtEnd, theme, pinInside, salary, autoUpdate);
+                        transparency, showProgress, notifyAtEnd, theme, pinInside, salary, autoUpdate, progressColor);
                 }
             }
             catch (IOException) { }
@@ -306,7 +364,8 @@ namespace OffClock
                 settings.Theme.ToString(),
                 settings.PinInside.ToString(),
                 settings.AnnualSalary.ToString(CultureInfo.InvariantCulture),
-                settings.AutoUpdate ? "AutoInstall" : "Off"
+                settings.AutoUpdate ? "AutoInstall" : "Off",
+                BarColor.Format(settings.ProgressColor)
             });
             if (File.Exists(path))
                 File.Replace(temporaryPath, path, null);

@@ -125,40 +125,68 @@ namespace OffClock
 
             string staged = target + "." + id + ".new";
             string backup = target + "." + id + ".bak";
+            Version version = null;
+            bool restorable = false;
             bool oldExited = false;
             bool replaced = false;
             try
             {
-                if (ExecutableVersion(source) <= ExecutableVersion(target)) return 1;
-                try
-                {
-                    using (var previous = Process.GetProcessById(processId))
-                        if (!previous.WaitForExit(10000)) return 1;
-                }
-                catch (ArgumentException) { }
+                Version installed = ExecutableVersion(target);
+                restorable = true;
+                version = ExecutableVersion(source);
+                if (version <= installed) throw new InvalidDataException("설치된 버전이 같거나 더 새롭습니다.");
+                if (!WaitForExit(processId)) return 1;
                 oldExited = true;
                 File.Copy(source, staged);
                 File.Replace(staged, target, backup);
                 replaced = true;
                 using (var restarted = Launch(target, "--clean-update " + id + " --show-release-notes"))
                     if (restarted.WaitForExit(1200))
-                        throw new InvalidOperationException("The updated app exited during startup.");
+                        throw new InvalidOperationException("새 버전이 시작하자마자 종료되었습니다.");
                 TryDelete(backup);
+                UpdateFailure.Clear(UpdateFailure.DefaultPath);
                 return 0;
             }
             catch (Exception ex)
             {
-                if (!(ex is IOException || ex is UnauthorizedAccessException || ex is Win32Exception ||
-                    ex is InvalidOperationException || ex is BadImageFormatException || ex is InvalidDataException))
-                    throw;
-                if (oldExited)
-                {
-                    if (replaced) File.Replace(backup, target, null);
-                    using (Launch(target, "--clean-update " + id)) { }
-                }
+                // The old app already quit for the install: record why first so auto-update stops retrying
+                // this version, then bring the old app back to show it once.
+                if (!restorable || (!oldExited && !WaitForExit(processId))) return 1;
+                if (version != null) UpdateFailure.Record(UpdateFailure.DefaultPath, version, ex.Message);
+                if (replaced && !Restore(backup, target)) return 1;
+                try { using (Launch(target, "--clean-update " + id + " --update-failed")) { } }
+                catch (Win32Exception) { }
+                catch (InvalidOperationException) { }
                 return 1;
             }
             finally { TryDelete(staged); }
+        }
+
+        // Scanners often hold a just-exited exe for a moment.
+        private static bool Restore(string backup, string target)
+        {
+            for (int attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    File.Replace(backup, target, null);
+                    return true;
+                }
+                catch (IOException) { if (attempt == 5) return false; }
+                catch (UnauthorizedAccessException) { if (attempt == 5) return false; }
+                Thread.Sleep(500);
+            }
+        }
+
+        // False while the previous app is still running after 10 seconds.
+        private static bool WaitForExit(int processId)
+        {
+            try
+            {
+                using (var previous = Process.GetProcessById(processId))
+                    return previous.WaitForExit(10000);
+            }
+            catch (ArgumentException) { return true; }
         }
 
         internal static Version ExecutableVersion(string exe)
@@ -271,6 +299,57 @@ namespace OffClock
         }
     }
 
+    // A failed install, kept so the restored app can say why once and auto-update skips that version.
+    internal sealed class UpdateFailure
+    {
+        public static readonly string DefaultPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OffClock", "update-failed.txt");
+        public readonly Version Version;
+        public readonly string Reason;
+
+        private UpdateFailure(Version version, string reason)
+        {
+            Version = version;
+            Reason = reason;
+        }
+
+        public bool IsFor(Version version) { return Version == version; }
+
+        public static void Record(string path, Version version, string reason)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                File.WriteAllText(path, version + Environment.NewLine + (reason ?? ""));
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            catch (System.Security.SecurityException) { }
+        }
+
+        public static UpdateFailure Load(string path)
+        {
+            try
+            {
+                string[] lines = File.ReadAllLines(path);
+                Version version;
+                if (lines.Length == 0 || !Version.TryParse(lines[0], out version)) return null;
+                return new UpdateFailure(version, string.Join(Environment.NewLine, lines, 1, lines.Length - 1));
+            }
+            catch (IOException) { return null; }
+            catch (UnauthorizedAccessException) { return null; }
+            catch (System.Security.SecurityException) { return null; }
+        }
+
+        public static void Clear(string path)
+        {
+            try { File.Delete(path); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            catch (System.Security.SecurityException) { }
+        }
+    }
+
     internal sealed class UpdateDialog : Form
     {
         private readonly Label status;
@@ -291,7 +370,7 @@ namespace OffClock
             MinimizeBox = MaximizeBox = false;
             ShowInTaskbar = false;
             TopMost = true;
-            status = new Label { Location = new Point(18, 16), Size = new Size(426, 54) };
+            status = new Label { Name = "Status", Location = new Point(18, 16), Size = new Size(426, 54) };
             notes = new TextBox
             {
                 Name = "ReleaseNotes", AccessibleName = "변경 내용", Multiline = true, ReadOnly = true,
@@ -350,6 +429,15 @@ namespace OffClock
             {
                 if (busy && e.CloseReason == CloseReason.UserClosing) e.Cancel = true;
             };
+        }
+
+        public UpdateDialog(UpdateFailure failure) : this(true)
+        {
+            Text = "퇴근시계 업데이트 실패";
+            string version = failure.Version.Build >= 0 ? failure.Version.ToString(3) : failure.Version.ToString();
+            status.Text = "v" + version + " 업데이트를 설치하지 못했습니다.\r\n지금 버전으로 계속 실행합니다.";
+            ShowNotes((string.IsNullOrWhiteSpace(failure.Reason) ? "" : "원인: " + failure.Reason.Trim() + "\n\n") +
+                "자동 업데이트는 이 버전을 다시 설치하지 않습니다. 설정의 업데이트 확인에서 직접 설치할 수 있습니다.");
         }
 
         private void ShowNotes(string text)

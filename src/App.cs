@@ -15,7 +15,7 @@ using Timer = System.Windows.Forms.Timer;
 
 [assembly: System.Reflection.AssemblyTitle("퇴근시계")]
 [assembly: System.Reflection.AssemblyDescription("Windows 작업표시줄 퇴근 카운트다운")]
-[assembly: System.Reflection.AssemblyVersion("1.3.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.4.0.0")]
 
 namespace OffClock
 {
@@ -94,6 +94,7 @@ namespace OffClock
             if (args.Length > 0 && args[0] == "--install-update") return ReleaseUpdate.Install(args);
             bool restartingAfterUpdate = args.Length >= 2 && args[0] == "--clean-update";
             bool showReleaseNotes = restartingAfterUpdate && args.Length == 3 && args[2] == "--show-release-notes";
+            bool updateFailed = restartingAfterUpdate && args.Length == 3 && args[2] == "--update-failed";
             if (restartingAfterUpdate) ReleaseUpdate.CleanAfterInstall(args[1]);
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -104,7 +105,8 @@ namespace OffClock
 
                 string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                     "OffClock", "schedule.txt");
-                using (var app = new ClockApplication(new SettingsFile(path), restartingAfterUpdate, showReleaseNotes))
+                using (var app = new ClockApplication(new SettingsFile(path), restartingAfterUpdate, showReleaseNotes,
+                    updateFailed))
                     Application.Run(app);
             }
             return 0;
@@ -132,10 +134,18 @@ namespace OffClock
         private bool resumePending;
         private DateTime nextUpdateCheck;
         private Task<string> automaticUpdate;
+        private Func<UpdateDialog> pendingNotice;
 
-        public ClockApplication(SettingsFile store, bool restartingAfterUpdate, bool showReleaseNotes)
+        public ClockApplication(SettingsFile store, bool restartingAfterUpdate, bool showReleaseNotes,
+            bool updateFailed = false)
         {
             this.store = store;
+            if (showReleaseNotes) pendingNotice = () => new UpdateDialog(true);
+            else if (updateFailed)
+            {
+                UpdateFailure failure = UpdateFailure.Load(UpdateFailure.DefaultPath);
+                if (failure != null) pendingNotice = () => new UpdateDialog(failure);
+            }
             settings = store.Load();
             nextUpdateCheck = restartingAfterUpdate ? DateTime.UtcNow.AddHours(6) : DateTime.MinValue;
             using (Graphics screen = Graphics.FromHwnd(IntPtr.Zero))
@@ -164,10 +174,10 @@ namespace OffClock
             animation.Tick += delegate { UpdateCountdown(); };
             placement.Tick += delegate
             {
-                if (showReleaseNotes)
+                if (pendingNotice != null)
                 {
-                    showReleaseNotes = false;
-                    installedNotes = new UpdateDialog(true);
+                    installedNotes = pendingNotice();
+                    pendingNotice = null;
                     installedNotes.FormClosed += delegate { installedNotes = null; };
                     installedNotes.Show();
                 }
@@ -256,7 +266,9 @@ namespace OffClock
             automaticUpdate = Task.Run(delegate
             {
                 ReleaseUpdate release = ReleaseUpdate.Check();
-                return release == null ? null : release.Download();
+                if (release == null) return null;
+                UpdateFailure failure = UpdateFailure.Load(UpdateFailure.DefaultPath);
+                return failure != null && failure.IsFor(release.Version) ? null : release.Download();
             });
         }
 
@@ -291,9 +303,10 @@ namespace OffClock
                 {
                     strip = new ClockStrip(dpi);
                     if (editor == null)
-                        strip.SetAppearance(settings.Transparency, settings.ShowProgress, settings.Theme);
+                        strip.SetAppearance(settings.Transparency, settings.ShowProgress, settings.Theme, settings.ProgressColor);
                     else
-                        strip.SetAppearance(editor.SelectedTransparency, editor.ShowProgress, editor.SelectedTheme);
+                        strip.SetAppearance(editor.SelectedTransparency, editor.ShowProgress, editor.SelectedTheme,
+                            editor.SelectedProgressColor);
                     strip.MouseClick += delegate(object sender, MouseEventArgs e)
                     {
                         if (e.Button == MouseButtons.Left) strip.BeginInvoke((Action)EditSettings);
@@ -375,15 +388,15 @@ namespace OffClock
                 finally
                 {
                     editor = null;
-                    UpdateAppearance(settings.Transparency, settings.ShowProgress, settings.Theme);
+                    UpdateAppearance(settings.Transparency, settings.ShowProgress, settings.Theme, settings.ProgressColor);
                 }
             }
         }
 
-        private void UpdateAppearance(int transparency, bool showProgress, ClockTheme theme)
+        private void UpdateAppearance(int transparency, bool showProgress, ClockTheme theme, Color progressColor)
         {
             foreach (ClockStrip strip in strips.Values)
-                strip.SetAppearance(transparency, showProgress, theme);
+                strip.SetAppearance(transparency, showProgress, theme, progressColor);
         }
 
         private void ShowFinishNotice()
@@ -458,32 +471,6 @@ namespace OffClock
         }
     }
 
-    internal sealed class ClockPalette
-    {
-        private static readonly ClockPalette Dark = new ClockPalette(
-            0x1A202B, 0x3F4B5D, 0xF3F8FF, 0xB1BFD3, 0x7BE8B8, 0xFFC286, 0xFF6A70, 0x3C485A);
-        private static readonly ClockPalette Light = new ClockPalette(
-            0xF6F8FB, 0xB8C6D6, 0x18283D, 0x43536A, 0x167256, 0x9A4812, 0xB51E36, 0xD6E0EB);
-
-        public readonly Color Background, Border, Digits, Muted, Normal, Soon, Urgent, Track;
-
-        private ClockPalette(int background, int border, int digits, int muted, int normal, int soon, int urgent, int track)
-        {
-            Background = Opaque(background);
-            Border = Opaque(border);
-            Digits = Opaque(digits);
-            Muted = Opaque(muted);
-            Normal = Opaque(normal);
-            Soon = Opaque(soon);
-            Urgent = Opaque(urgent);
-            Track = Opaque(track);
-        }
-
-        private static Color Opaque(int rgb) { return Color.FromArgb(unchecked((int)0xFF000000) | rgb); }
-
-        public static ClockPalette For(ClockTheme theme) { return theme == ClockTheme.Light ? Light : Dark; }
-    }
-
     internal sealed class FinishNotice : TaskbarWindow
     {
         private readonly ClockPalette palette;
@@ -549,6 +536,7 @@ namespace OffClock
         private long earnings;
         private bool showProgress = true;
         private ClockTheme theme;
+        private Color progressColor;
         public event EventHandler TaskbarCreated;
         public event EventHandler PowerResumed;
 
@@ -587,12 +575,15 @@ namespace OffClock
             Invalidate();
         }
 
-        public void SetAppearance(int transparency, bool showProgress, ClockTheme theme = ClockTheme.Dark)
+        public void SetAppearance(int transparency, bool showProgress, ClockTheme theme = ClockTheme.Dark,
+            Color progressColor = default(Color))
         {
             Opacity = 1 - transparency / 100.0;
-            if (this.showProgress == showProgress && this.theme == theme) return;
+            progressColor = BarColor.Opaque(progressColor);
+            if (this.showProgress == showProgress && this.theme == theme && this.progressColor == progressColor) return;
             this.showProgress = showProgress;
             this.theme = theme;
+            this.progressColor = progressColor;
             Invalidate();
         }
 
@@ -605,7 +596,8 @@ namespace OffClock
             g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
 
             ClockPalette palette = ClockPalette.For(theme);
-            Color accent = AccentColor(palette);
+            CountdownStage stage = countdown.Stage;
+            Color accent = palette.Accent(stage);
             using (var panel = RoundedRectangle(0.5f, 0.5f, 234, 33, 9))
             using (var panelFill = new SolidBrush(palette.Background))
             using (var outline = new Pen(palette.Border))
@@ -619,31 +611,31 @@ namespace OffClock
                 g.FillPath(panelFill, panel);
                 g.DrawPath(outline, panel);
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.DrawEllipse(accentPen, 9, 7, 15, 15);
-                if (countdown.Finished)
-                    g.DrawLines(accentPen, new[] { new PointF(13, 14.5f), new PointF(16, 17.5f), new PointF(20.5f, 12) });
+                if (palette.Mascot != Mascot.None)
+                    MascotPainter.Draw(g, palette, stage);
                 else
-                    g.DrawLines(accentPen, new[] { new PointF(16.5f, 10.5f), new PointF(16.5f, 14.5f), new PointF(19.5f, 16) });
+                {
+                    g.DrawEllipse(accentPen, 9, 7, 15, 15);
+                    if (countdown.Finished)
+                        g.DrawLines(accentPen, new[] { new PointF(13, 14.5f), new PointF(16, 17.5f), new PointF(20.5f, 12) });
+                    else
+                        g.DrawLines(accentPen, new[] { new PointF(16.5f, 10.5f), new PointF(16.5f, 14.5f), new PointF(19.5f, 16) });
+                }
 
                 string label = display == DisplayMode.Earnings ? "오늘 급여" :
                     (countdown.Finished ? "퇴근 완료" : "퇴근까지");
                 g.DrawString(label, labelFont, dim, 31, 7.5f);
-                DrawTime(g, accent == palette.Urgent ? accentBrush : bright, accentBrush);
+                DrawTime(g, stage == CountdownStage.Urgent ? accentBrush : bright, accentBrush);
                 if (showProgress)
                 {
                     using (var track = new SolidBrush(palette.Track))
+                    using (var bar = new SolidBrush(progressColor.IsEmpty ? accent : progressColor))
+                    {
                         g.FillRectangle(track, 10, 27, 215, 2);
-                    g.FillRectangle(accentBrush, 10, 27, (float)(215 * countdown.Progress), 2);
+                        g.FillRectangle(bar, 10, 27, (float)(215 * countdown.Progress), 2);
+                    }
                 }
             }
-        }
-
-        private Color AccentColor(ClockPalette palette)
-        {
-            if (countdown.Finished) return palette.Normal;
-            if (countdown.Remaining <= TimeSpan.FromMinutes(10)) return palette.Urgent;
-            if (countdown.Remaining <= TimeSpan.FromMinutes(30)) return palette.Soon;
-            return palette.Normal;
         }
 
         private void DrawTime(Graphics g, Brush digits, Brush accent)
@@ -711,15 +703,22 @@ namespace OffClock
         private readonly TrackBar transparency;
         private readonly CheckBox progress;
         private readonly ComboBox theme;
+        private readonly Label swatch;
+        private readonly Button pickColor;
+        private readonly Button resetColor;
         private readonly Label feedback;
+        private Color progressColor;
         private readonly CheckBox startAtLogin;
         public bool StartAtLogin { get { return startAtLogin.Checked; } }
         public Action<ClockSettings> StoreSettings { get; set; }
         public Action CheckForUpdate { get; set; }
-        public Action<int, bool, ClockTheme> PreviewAppearance { get; set; }
+        public Action<int, bool, ClockTheme, Color> PreviewAppearance { get; set; }
+        // Receives the bar color shown now; returns null when the user cancels.
+        public Func<Color, Color?> PickProgressColor { get; set; }
         public int SelectedTransparency { get { return transparency.Value; } }
         public bool ShowProgress { get { return progress.Checked; } }
         public ClockTheme SelectedTheme { get { return (ClockTheme)theme.SelectedIndex; } }
+        public Color SelectedProgressColor { get { return progressColor; } }
 
         public ClockSettingsDialog(ClockSettings settings, Icon icon, bool registeredAtLogin = false)
         {
@@ -747,9 +746,11 @@ namespace OffClock
             var monitor = AddDropDown("Monitor", "표시할 모니터", 145);
             PopulateMonitors(monitor, settings.Monitor);
             theme = AddDropDown("Theme", "테마", 186);
-            theme.Items.AddRange(new object[] { "다크", "라이트" });
+            theme.Items.AddRange(new object[]
+            {
+                "다크", "라이트", "벚꽃", "바다", "숲", "노을", "고양이", "곰", "토끼", "펭귄", "병아리"
+            });
             theme.SelectedIndex = (int)settings.Theme;
-            theme.SelectedIndexChanged += delegate { Preview(); };
             var transparencyLabel = new Label { Text = "투명도", AutoSize = true, Location = new Point(18, 231) };
             transparency = new TrackBar
             {
@@ -768,26 +769,48 @@ namespace OffClock
                 Name = "ShowProgress", Text = "진행 막대 표시", Checked = settings.ShowProgress,
                 AutoSize = true, Location = new Point(18, 266), TabIndex = 6
             };
+            progressColor = settings.ProgressColor;
+            swatch = new Label
+            {
+                Name = "ProgressColorSwatch", AccessibleName = "진행 막대 색", BorderStyle = BorderStyle.FixedSingle,
+                Location = new Point(150, 265), Size = new Size(22, 22)
+            };
+            pickColor = new Button
+            {
+                Name = "ProgressColor", Text = "색 변경", Location = new Point(178, 262), Size = new Size(64, 28), TabIndex = 7
+            };
+            resetColor = new Button
+            {
+                Name = "ResetProgressColor", Text = "기본값", Location = new Point(246, 262), Size = new Size(58, 28), TabIndex = 8
+            };
+            PickProgressColor = ShowColorDialog;
+            pickColor.Click += delegate
+            {
+                if (PickProgressColor == null) return;
+                Color? picked = PickProgressColor(swatch.BackColor);
+                if (picked.HasValue) SetProgressColor(picked.Value);
+            };
+            resetColor.Click += delegate { SetProgressColor(Color.Empty); };
             var notify = new CheckBox
             {
                 Name = "NotifyAtEnd", Text = "퇴근 시간에 화면 알림 (무음)", Checked = settings.NotifyAtEnd,
-                AutoSize = true, Location = new Point(18, 298), TabIndex = 7
+                AutoSize = true, Location = new Point(18, 298), TabIndex = 9
             };
             var pinInside = new CheckBox
             {
                 Name = "PinInside", Text = "가로 작업표시줄 안에 고정", Checked = settings.PinInside,
-                AutoSize = true, Location = new Point(18, 330), TabIndex = 8
+                AutoSize = true, Location = new Point(18, 330), TabIndex = 10
             };
             startAtLogin = new CheckBox
             {
                 Name = "StartAtLogin", Text = "Windows 로그인 시 자동 시작", Checked = registeredAtLogin,
-                AutoSize = true, Location = new Point(18, 362), TabIndex = 9
+                AutoSize = true, Location = new Point(18, 362), TabIndex = 11
             };
             var salaryLabel = new Label { Text = "세전 연봉 (원)", AutoSize = true, Location = new Point(18, 403) };
             var salary = new TextBox
             {
                 Name = "AnnualSalary", AccessibleName = "세전 연봉 (원)", Location = new Point(150, 398),
-                Width = 154, MaxLength = 20, TextAlign = HorizontalAlignment.Right, TabIndex = 10,
+                Width = 154, MaxLength = 20, TextAlign = HorizontalAlignment.Right, TabIndex = 12,
                 Text = settings.AnnualSalary == 0 ? "" : settings.AnnualSalary.ToString("N0", CultureInfo.InvariantCulture)
             };
             var salaryInKorean = new Label
@@ -806,12 +829,12 @@ namespace OffClock
             var autoUpdates = new CheckBox
             {
                 Name = "AutoUpdates", Text = "자동 업데이트", Checked = settings.AutoUpdate,
-                AutoSize = true, Location = new Point(18, 473), TabIndex = 11
+                AutoSize = true, Location = new Point(18, 473), TabIndex = 13
             };
             var checkUpdate = new Button
             {
                 Name = "CheckForUpdate", Text = "업데이트 확인", Location = new Point(192, 467),
-                Size = new Size(112, 30), TabIndex = 12
+                Size = new Size(112, 30), TabIndex = 14
             };
             checkUpdate.Click += delegate { if (CheckForUpdate != null) CheckForUpdate(); };
             transparency.ValueChanged += delegate
@@ -819,7 +842,17 @@ namespace OffClock
                 percentage.Text = transparency.Value + "%";
                 Preview();
             };
-            progress.CheckedChanged += delegate { Preview(); };
+            progress.CheckedChanged += delegate
+            {
+                RefreshProgressColor();
+                Preview();
+            };
+            theme.SelectedIndexChanged += delegate
+            {
+                RefreshProgressColor();
+                Preview();
+            };
+            RefreshProgressColor();
             start.TabIndex = 0;
             end.TabIndex = 1;
             display.TabIndex = 2;
@@ -832,21 +865,22 @@ namespace OffClock
                 AutoSize = true,
                 Location = new Point(18, 511)
             };
-            var save = new Button { Text = "저장", Location = new Point(225, 545), Size = new Size(79, 28), TabIndex = 14 };
+            var save = new Button { Text = "저장", Location = new Point(225, 545), Size = new Size(79, 28), TabIndex = 16 };
             var cancel = new Button
             {
-                Text = "취소", Location = new Point(138, 545), Size = new Size(79, 28), TabIndex = 13,
+                Text = "취소", Location = new Point(138, 545), Size = new Size(79, 28), TabIndex = 15,
                 DialogResult = DialogResult.Cancel
             };
             save.Click += delegate
             {
                 Save(start.Value.TimeOfDay, end.Value.TimeOfDay, (DisplayMode)display.SelectedIndex,
                     ((MonitorOption)monitor.SelectedItem).Device, transparency.Value, progress.Checked,
-                    notify.Checked, SelectedTheme, pinInside.Checked, salary.Text, autoUpdates.Checked);
+                    notify.Checked, SelectedTheme, pinInside.Checked, salary.Text, autoUpdates.Checked, progressColor);
             };
             Controls.AddRange(new Control[]
             {
-                start, end, transparencyLabel, transparency, percentage, progress, notify, pinInside, startAtLogin,
+                start, end, transparencyLabel, transparency, percentage, progress, swatch, pickColor, resetColor,
+                notify, pinInside, startAtLogin,
                 salaryLabel, salary, salaryInKorean, autoUpdates, checkUpdate, feedback, cancel, save
             });
             AcceptButton = save;
@@ -855,7 +889,33 @@ namespace OffClock
 
         private void Preview()
         {
-            if (PreviewAppearance != null) PreviewAppearance(SelectedTransparency, ShowProgress, SelectedTheme);
+            if (PreviewAppearance != null)
+                PreviewAppearance(SelectedTransparency, ShowProgress, SelectedTheme, SelectedProgressColor);
+        }
+
+        private void SetProgressColor(Color color)
+        {
+            progressColor = BarColor.Opaque(color);
+            RefreshProgressColor();
+            Preview();
+        }
+
+        private void RefreshProgressColor()
+        {
+            swatch.BackColor = progressColor.IsEmpty ? ClockPalette.For(SelectedTheme).Normal : progressColor;
+            pickColor.Enabled = progress.Checked;
+            resetColor.Enabled = progress.Checked && !progressColor.IsEmpty;
+        }
+
+        private Color? ShowColorDialog(Color current)
+        {
+            using (var picker = new ColorDialog
+            {
+                Color = current, AnyColor = true, FullOpen = true, CustomColors = ClockPalette.AccentSwatches()
+            })
+            {
+                return picker.ShowDialog(this) == DialogResult.OK ? picker.Color : (Color?)null;
+            }
         }
 
         private DateTimePicker TimePicker(TimeSpan time, string name, int y)
@@ -931,7 +991,7 @@ namespace OffClock
 
         private void Save(TimeSpan start, TimeSpan end, DisplayMode display, string monitor,
             int translucency, bool showProgress, bool notifyAtEnd, ClockTheme selectedTheme, bool pinInside,
-            string salaryText, bool autoUpdates)
+            string salaryText, bool autoUpdates, Color selectedProgressColor)
         {
             try
             {
@@ -941,7 +1001,8 @@ namespace OffClock
                 if (display == DisplayMode.Earnings && salary == 0)
                     throw new ArgumentException("오늘 급여를 표시하려면 세전 연봉을 입력하세요.");
                 StoreSettings(new ClockSettings(new Schedule(start, end), display, monitor,
-                    translucency, showProgress, notifyAtEnd, selectedTheme, pinInside, salary, autoUpdates));
+                    translucency, showProgress, notifyAtEnd, selectedTheme, pinInside, salary, autoUpdates,
+                    selectedProgressColor));
                 DialogResult = DialogResult.OK;
             }
             catch (ArgumentException e) { ShowError(e.Message); }

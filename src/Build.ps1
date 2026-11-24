@@ -49,7 +49,7 @@ $arguments = @(
     '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll',
     '/r:System.Web.Extensions.dll', '/r:System.IO.Compression.dll', '/r:System.IO.Compression.FileSystem.dll',
     "/r:$wpf\WindowsBase.dll", "/r:$wpf\UIAutomationTypes.dll", "/r:$wpf\UIAutomationClient.dll",
-    "$PSScriptRoot\Clock.cs", "$PSScriptRoot\Taskbar.cs", "$PSScriptRoot\App.cs", "$PSScriptRoot\ReleaseUpdate.cs"
+    "$PSScriptRoot\Clock.cs", "$PSScriptRoot\Theme.cs", "$PSScriptRoot\Taskbar.cs", "$PSScriptRoot\App.cs", "$PSScriptRoot\ReleaseUpdate.cs"
 )
 $previousTemp = $env:TEMP
 $previousTmp = $env:TMP
