@@ -146,17 +146,66 @@ namespace OffClock
         }
     }
 
-    internal sealed class Schedule
+    internal sealed class LunchBreak
     {
-        public static readonly Schedule Default = new Schedule(TimeSpan.FromHours(9), TimeSpan.FromHours(18));
+        public static readonly LunchBreak Default = new LunchBreak(false, TimeSpan.FromHours(12), TimeSpan.FromHours(13));
+        public readonly bool Enabled;
         public readonly TimeSpan Start;
         public readonly TimeSpan End;
 
-        public Schedule(TimeSpan start, TimeSpan end)
+        public LunchBreak(bool enabled, TimeSpan start, TimeSpan end)
+        {
+            Enabled = enabled;
+            Start = start;
+            End = end;
+        }
+
+        public TimeSpan Length { get { return Schedule.Wrap(End - Start); } }
+
+        public string Format()
+        {
+            return (Enabled ? "On " : "Off ") + Schedule.Format(Start) + "-" + Schedule.Format(End);
+        }
+
+        public static LunchBreak Parse(string text)
+        {
+            string[] parts = (text ?? "").Split(' ');
+            string[] times = parts.Length == 2 ? parts[1].Split('-') : new string[0];
+            TimeSpan start, end;
+            if ((parts[0] != "On" && parts[0] != "Off") || times.Length != 2 ||
+                !TimeSpan.TryParseExact(times[0], @"hh\:mm", CultureInfo.InvariantCulture, out start) ||
+                !TimeSpan.TryParseExact(times[1], @"hh\:mm", CultureInfo.InvariantCulture, out end))
+                return Default;
+            return new LunchBreak(parts[0] == "On", start, end);
+        }
+    }
+
+    internal sealed class Schedule
+    {
+        private static readonly TimeSpan Day = TimeSpan.FromDays(1);
+        public static readonly Schedule Default = new Schedule(TimeSpan.FromHours(9), TimeSpan.FromHours(18));
+        public readonly TimeSpan Start;
+        public readonly TimeSpan End;
+        public readonly LunchBreak Lunch;
+
+        public Schedule(TimeSpan start, TimeSpan end, LunchBreak lunch = null)
         {
             if (start == end) throw new ArgumentException("출근 시간과 퇴근 시간을 다르게 설정하세요.");
             Start = start;
             End = end;
+            Lunch = lunch ?? LunchBreak.Default;
+            TimeSpan shift = Wrap(end - start);
+            if (Lunch.Enabled && (LunchLength == TimeSpan.Zero || LunchLength >= shift || LunchOffset + LunchLength > shift))
+                throw new ArgumentException("점심시간은 근무 시간 안에서 시작과 끝을 다르게 설정하세요.");
+        }
+
+        // Lunch position measured from the shift start, so overnight shifts work across midnight.
+        private TimeSpan LunchOffset { get { return Wrap(Lunch.Start - Start); } }
+        private TimeSpan LunchLength { get { return Lunch.Length; } }
+
+        internal static TimeSpan Wrap(TimeSpan time)
+        {
+            return TimeSpan.FromTicks((time.Ticks % Day.Ticks + Day.Ticks) % Day.Ticks);
         }
 
         public Countdown At(DateTime now)
@@ -165,8 +214,22 @@ namespace OffClock
             DateTime start = WorkDateAt(now).Add(Start);
 
             TimeSpan remaining = now < end ? end - now : TimeSpan.Zero;
-            double progress = (now - start).TotalSeconds / (end - start).TotalSeconds;
-            return new Countdown(remaining, Math.Max(0, Math.Min(1, progress)));
+            if (!Lunch.Enabled) return new Countdown(remaining, Ratio(now - start, end - start));
+
+            // Progress, and so the day's pay, pauses over lunch.
+            DateTime lunchStart = start.Add(LunchOffset);
+            DateTime lunchEnd = lunchStart.Add(LunchLength);
+            TimeSpan worked = now - start;
+            if (now > lunchStart) worked -= (now < lunchEnd ? now : lunchEnd) - lunchStart;
+            double progress = Ratio(worked, end - start - LunchLength);
+            if (now < lunchStart) return new Countdown(lunchStart - now, progress, CountdownTarget.Lunch);
+            if (now < lunchEnd) return new Countdown(lunchEnd - now, progress, CountdownTarget.LunchEnd);
+            return new Countdown(remaining, progress);
+        }
+
+        private static double Ratio(TimeSpan part, TimeSpan whole)
+        {
+            return Math.Max(0, Math.Min(1, part.TotalSeconds / whole.TotalSeconds));
         }
 
         public DateTime WorkDateAt(DateTime now)
@@ -206,7 +269,16 @@ namespace OffClock
 
         public bool ShouldNotify(Schedule schedule, DateTime now)
         {
-            DateTime deadline = schedule.DeadlineAt(now);
+            return Crossed(schedule.DeadlineAt(now), now);
+        }
+
+        public bool ShouldNotify(TimeSpan timeOfDay, DateTime now)
+        {
+            return Crossed(now.Date.Add(timeOfDay), now);
+        }
+
+        private bool Crossed(DateTime deadline, DateTime now)
+        {
             if (deadline > now) deadline = deadline.AddDays(-1);
             bool crossedDeadline = previousCheck < deadline;
             previousCheck = now;
@@ -222,27 +294,83 @@ namespace OffClock
         Finished
     }
 
+    internal enum Milestone
+    {
+        None,
+        Leave,
+        LunchStarts,
+        LunchEnding
+    }
+
+    // Which silent notice is due now: leaving, lunch starting, or lunch ending in 5 minutes.
+    internal sealed class MilestoneReminder
+    {
+        private static readonly TimeSpan EndingWarning = TimeSpan.FromMinutes(5);
+        private readonly FinishReminder leave;
+        private readonly FinishReminder lunchStarts;
+        private readonly FinishReminder lunchEnding;
+
+        public MilestoneReminder(DateTime now)
+        {
+            leave = new FinishReminder(now);
+            lunchStarts = new FinishReminder(now);
+            lunchEnding = new FinishReminder(now);
+        }
+
+        public void Reset(DateTime now)
+        {
+            leave.Reset(now);
+            lunchStarts.Reset(now);
+            lunchEnding.Reset(now);
+        }
+
+        // Call on every tick so each reminder keeps its own last-check time.
+        public Milestone Check(Schedule schedule, DateTime now)
+        {
+            LunchBreak lunch = schedule.Lunch;
+            bool leaving = leave.ShouldNotify(schedule, now);
+            bool starts = lunch.Enabled && lunchStarts.ShouldNotify(lunch.Start, now);
+            bool ending = lunch.Enabled && lunch.Length > EndingWarning + EndingWarning &&
+                lunchEnding.ShouldNotify(Schedule.Wrap(lunch.End - EndingWarning), now);
+            if (leaving) return Milestone.Leave;
+            if (starts) return Milestone.LunchStarts;
+            return ending ? Milestone.LunchEnding : Milestone.None;
+        }
+    }
+
+    internal enum CountdownTarget
+    {
+        Leave,
+        Lunch,
+        LunchEnd
+    }
+
     internal struct Countdown
     {
+        // Time left to Target: leaving work, or the start or end of lunch.
         public readonly TimeSpan Remaining;
         public readonly double Progress;
-        public bool Finished { get { return Remaining == TimeSpan.Zero; } }
+        public readonly CountdownTarget Target;
+        public bool Finished { get { return Target == CountdownTarget.Leave && Remaining == TimeSpan.Zero; } }
 
         public CountdownStage Stage
         {
             get
             {
                 if (Finished) return CountdownStage.Finished;
-                if (Remaining <= TimeSpan.FromMinutes(10)) return CountdownStage.Urgent;
+                // Lunch coming up is good news: no red alert for it.
+                if (Remaining <= TimeSpan.FromMinutes(10))
+                    return Target == CountdownTarget.Lunch ? CountdownStage.Soon : CountdownStage.Urgent;
                 if (Remaining <= TimeSpan.FromMinutes(30)) return CountdownStage.Soon;
                 return CountdownStage.Running;
             }
         }
 
-        public Countdown(TimeSpan remaining, double progress)
+        public Countdown(TimeSpan remaining, double progress, CountdownTarget target = CountdownTarget.Leave)
         {
             Remaining = remaining;
             Progress = progress;
+            Target = target;
         }
 
         public string Seconds { get { return Remaining.ToString(@"hh\:mm\:ss", CultureInfo.InvariantCulture); } }
@@ -337,7 +465,11 @@ namespace OffClock
                     // Older versions could opt in to checking only.
                     bool autoUpdate = lines.Length >= 11 && lines[10] == "AutoInstall";
                     Color progressColor = lines.Length >= 12 ? BarColor.Parse(lines[11]) : Color.Empty;
-                    return new ClockSettings(new Schedule(start, end), display, lines.Length >= 4 ? lines[3] : "",
+                    LunchBreak lunch = lines.Length >= 13 ? LunchBreak.Parse(lines[12]) : LunchBreak.Default;
+                    Schedule schedule;
+                    try { schedule = new Schedule(start, end, lunch); }
+                    catch (ArgumentException) { schedule = new Schedule(start, end, new LunchBreak(false, lunch.Start, lunch.End)); }
+                    return new ClockSettings(schedule, display, lines.Length >= 4 ? lines[3] : "",
                         transparency, showProgress, notifyAtEnd, theme, pinInside, salary, autoUpdate, progressColor);
                 }
             }
@@ -365,7 +497,8 @@ namespace OffClock
                 settings.PinInside.ToString(),
                 settings.AnnualSalary.ToString(CultureInfo.InvariantCulture),
                 settings.AutoUpdate ? "AutoInstall" : "Off",
-                BarColor.Format(settings.ProgressColor)
+                BarColor.Format(settings.ProgressColor),
+                settings.Schedule.Lunch.Format()
             });
             if (File.Exists(path))
                 File.Replace(temporaryPath, path, null);

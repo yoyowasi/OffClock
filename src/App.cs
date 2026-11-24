@@ -15,7 +15,7 @@ using Timer = System.Windows.Forms.Timer;
 
 [assembly: System.Reflection.AssemblyTitle("퇴근시계")]
 [assembly: System.Reflection.AssemblyDescription("Windows 작업표시줄 퇴근 카운트다운")]
-[assembly: System.Reflection.AssemblyVersion("1.4.1.0")]
+[assembly: System.Reflection.AssemblyVersion("1.5.0.0")]
 
 namespace OffClock
 {
@@ -121,7 +121,7 @@ namespace OffClock
         private readonly TaskbarDock dock = new TaskbarDock();
         private readonly Timer animation = new Timer { Interval = 32 };
         private readonly Timer placement = new Timer { Interval = 400 };
-        private readonly FinishReminder reminder = new FinishReminder(DateTime.Now);
+        private readonly MilestoneReminder reminder = new MilestoneReminder(DateTime.Now);
         private readonly Icon icon;
         private readonly ContextMenuStrip menu = new ContextMenuStrip();
         private readonly NotifyIcon tray;
@@ -192,8 +192,7 @@ namespace OffClock
                     foreach (ClockStrip strip in strips.Values)
                         if (strip.Visible) strip.Invalidate();
                 }
-                if (settings.NotifyAtEnd && reminder.ShouldNotify(settings.Schedule, DateTime.Now))
-                    ShowFinishNotice();
+                if (settings.NotifyAtEnd) NotifyMilestone(reminder.Check(settings.Schedule, DateTime.Now));
                 CheckForUpdates();
             };
             dock.RefreshInlineSpace();
@@ -203,8 +202,10 @@ namespace OffClock
 
         private void UpdateTrayText()
         {
+            LunchBreak lunch = settings.Schedule.Lunch;
             tray.Text = "퇴근시계  ·  " + Schedule.Format(settings.Schedule.Start) +
-                "–" + Schedule.Format(settings.Schedule.End);
+                "–" + Schedule.Format(settings.Schedule.End) +
+                (lunch.Enabled ? "  ·  점심 " + Schedule.Format(lunch.Start) + "–" + Schedule.Format(lunch.End) : "");
         }
 
         private void UpdateCountdown()
@@ -375,7 +376,8 @@ namespace OffClock
                     {
                         startup.Save(dialog.StartAtLogin, delegate { store.Save(updated); });
                         if (updated.NotifyAtEnd != settings.NotifyAtEnd ||
-                            updated.Schedule.Start != settings.Schedule.Start || updated.Schedule.End != settings.Schedule.End)
+                            updated.Schedule.Start != settings.Schedule.Start || updated.Schedule.End != settings.Schedule.End ||
+                            updated.Schedule.Lunch.Format() != settings.Schedule.Lunch.Format())
                             reminder.Reset(DateTime.Now);
                         if (updated.AutoUpdate && !settings.AutoUpdate) nextUpdateCheck = DateTime.MinValue;
                         settings = updated;
@@ -399,12 +401,20 @@ namespace OffClock
                 strip.SetAppearance(transparency, showProgress, theme, progressColor);
         }
 
-        private void ShowFinishNotice()
+        private void NotifyMilestone(Milestone milestone)
+        {
+            string lunchEnd = Schedule.Format(settings.Schedule.Lunch.End);
+            if (milestone == Milestone.Leave) ShowNotice("퇴근 시간이에요", "설정한 퇴근 시간이 되었습니다.");
+            else if (milestone == Milestone.LunchStarts) ShowNotice("점심시간이에요", lunchEnd + "까지 맛있게 드세요.");
+            else if (milestone == Milestone.LunchEnding) ShowNotice("점심 5분 남았어요", lunchEnd + "에 점심시간이 끝납니다.");
+        }
+
+        private void ShowNotice(string title, string body)
         {
             Taskbar taskbar = TaskbarDock.FindForDisplay(settings.Monitor).First();
             if (Native.IsFullscreen(taskbar.Screen.Bounds)) return;
             if (notice != null) notice.Close();
-            notice = new FinishNotice(dpi, settings.Theme, taskbar.Screen.WorkingArea);
+            notice = new FinishNotice(dpi, settings.Theme, taskbar.Screen.WorkingArea, title, body);
             ClockStrip strip;
             if (strips.TryGetValue(taskbar.Screen.DeviceName, out strip) && strip.Visible &&
                 notice.Bounds.IntersectsWith(strip.Bounds))
@@ -478,12 +488,15 @@ namespace OffClock
         private readonly Timer dismissal = new Timer { Interval = 4000 };
         private readonly Font titleFont = new Font("Malgun Gothic", 16, FontStyle.Bold, GraphicsUnit.Pixel);
         private readonly Font bodyFont = new Font("Malgun Gothic", 12, FontStyle.Regular, GraphicsUnit.Pixel);
+        private readonly string body;
 
-        public FinishNotice(float dpi, ClockTheme theme, Rectangle workArea)
+        public FinishNotice(float dpi, ClockTheme theme, Rectangle workArea, string title = "퇴근 시간이에요",
+            string body = "설정한 퇴근 시간이 되었습니다.")
         {
             this.dpi = dpi;
+            this.body = body;
             palette = ClockPalette.For(theme);
-            Text = "퇴근 시간이에요";
+            Text = title;
             BackColor = palette.Background;
             ClientSize = new Size((int)Math.Round(248 * dpi), (int)Math.Round(65 * dpi));
             int margin = (int)Math.Round(10 * dpi);
@@ -501,12 +514,12 @@ namespace OffClock
             using (var border = new Pen(palette.Border))
             using (var accent = new SolidBrush(palette.Normal))
             using (var title = new SolidBrush(palette.Digits))
-            using (var body = new SolidBrush(palette.Muted))
+            using (var muted = new SolidBrush(palette.Muted))
             {
                 graphics.DrawRectangle(border, 0.5f, 0.5f, 247, 64);
                 graphics.FillRectangle(accent, 9, 13, 3, 40);
                 graphics.DrawString(Text, titleFont, title, 21, 8);
-                graphics.DrawString("설정한 퇴근 시간이 되었습니다.", bodyFont, body, 22, 34);
+                graphics.DrawString(body, bodyFont, muted, 22, 34);
             }
         }
 
@@ -567,7 +580,7 @@ namespace OffClock
         public void Display(Countdown value, DisplayMode mode, long earned = 0)
         {
             if (value.Remaining == countdown.Remaining && value.Progress == countdown.Progress &&
-                mode == display && earned == earnings)
+                value.Target == countdown.Target && mode == display && earned == earnings)
                 return;
             countdown = value;
             display = mode;
@@ -623,8 +636,10 @@ namespace OffClock
                 }
 
                 string label = display == DisplayMode.Earnings ? "오늘 급여" :
+                    countdown.Target == CountdownTarget.Lunch ? "점심까지" :
+                    countdown.Target == CountdownTarget.LunchEnd ? "점심 끝까지" :
                     (countdown.Finished ? "퇴근 완료" : "퇴근까지");
-                g.DrawString(label, labelFont, dim, 31, 7.5f);
+                DrawLabel(g, label, dim);
                 DrawTime(g, stage == CountdownStage.Urgent ? accentBrush : bright, accentBrush);
                 if (showProgress)
                 {
@@ -636,6 +651,24 @@ namespace OffClock
                     }
                 }
             }
+        }
+
+        // The clock digits start at x 91: a label too long for the slot is narrowed instead of overlapping them.
+        private void DrawLabel(Graphics g, string label, Brush brush)
+        {
+            const float left = 31, limit = 88, padding = 2;
+            StringFormat format = StringFormat.GenericTypographic;
+            float width = g.MeasureString(label, labelFont, PointF.Empty, format).Width;
+            if (left + padding + width <= limit)
+            {
+                g.DrawString(label, labelFont, brush, left, 7.5f);
+                return;
+            }
+            GraphicsState state = g.Save();
+            g.TranslateTransform(left, 7.5f);
+            g.ScaleTransform((limit - left) / width, 1);
+            g.DrawString(label, labelFont, brush, 0, 0, format);
+            g.Restore(state);
         }
 
         private void DrawTime(Graphics g, Brush digits, Brush accent)
@@ -726,7 +759,7 @@ namespace OffClock
             if (icon != null) Icon = icon;
             AutoScaleDimensions = new SizeF(96, 96);
             AutoScaleMode = AutoScaleMode.Dpi;
-            ClientSize = new Size(324, 586);
+            ClientSize = new Size(324, 627);
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = MinimizeBox = false;
@@ -737,51 +770,65 @@ namespace OffClock
             ForeColor = SystemColors.WindowText;
             var start = TimePicker(settings.Schedule.Start, "출근 시간", 22);
             var end = TimePicker(settings.Schedule.End, "퇴근 시간", 63);
-            var display = AddDropDown("DisplayMode", "표시 형식", 104);
+            LunchBreak lunch = settings.Schedule.Lunch;
+            var lunchEnabled = new CheckBox
+            {
+                Name = "LunchEnabled", Text = "점심시간", Checked = lunch.Enabled, AutoSize = true,
+                Location = new Point(18, 107), TabIndex = 2
+            };
+            var lunchStart = LunchPicker("LunchStart", "점심 시작", lunch.Start, 150);
+            var lunchDash = new Label { Text = "~", AutoSize = true, Location = new Point(224, 108) };
+            var lunchEnd = LunchPicker("LunchEnd", "점심 끝", lunch.End, 236);
+            lunchStart.TabIndex = 3;
+            lunchEnd.TabIndex = 4;
+            EventHandler refreshLunch = delegate { lunchStart.Enabled = lunchEnd.Enabled = lunchEnabled.Checked; };
+            lunchEnabled.CheckedChanged += refreshLunch;
+            refreshLunch(lunchEnabled, EventArgs.Empty);
+            var display = AddDropDown("DisplayMode", "표시 형식", 145);
             display.Items.AddRange(new object[]
             {
                 "시:분:초.밀리초", "시간만", "분만", "초만", "밀리초만", "2진수", "8진수", "16진수", "오늘 급여"
             });
             display.SelectedIndex = (int)settings.Display;
-            var monitor = AddDropDown("Monitor", "표시할 모니터", 145);
+            var monitor = AddDropDown("Monitor", "표시할 모니터", 186);
             PopulateMonitors(monitor, settings.Monitor);
-            theme = AddDropDown("Theme", "테마", 186);
+            theme = AddDropDown("Theme", "테마", 227);
             theme.Items.AddRange(new object[]
             {
                 "다크", "라이트", "벚꽃", "바다", "숲", "노을", "고양이", "곰", "토끼", "펭귄", "병아리"
             });
             theme.SelectedIndex = (int)settings.Theme;
-            var transparencyLabel = new Label { Text = "투명도", AutoSize = true, Location = new Point(18, 231) };
+            var transparencyLabel = new Label { Text = "투명도", AutoSize = true, Location = new Point(18, 272) };
             transparency = new TrackBar
             {
                 Name = "Transparency", AccessibleName = "투명도", TickStyle = TickStyle.None,
                 Minimum = 0, Maximum = ClockSettings.MaxTransparency, Value = settings.Transparency,
-                SmallChange = 1, LargeChange = 10, AutoSize = false, Location = new Point(145, 224),
-                Size = new Size(118, 32), TabIndex = 5
+                SmallChange = 1, LargeChange = 10, AutoSize = false, Location = new Point(145, 265),
+                Size = new Size(118, 32), TabIndex = 8
             };
             var percentage = new Label
             {
                 Text = settings.Transparency + "%", TextAlign = ContentAlignment.MiddleRight,
-                Location = new Point(265, 227), Size = new Size(39, 23)
+                Location = new Point(265, 268), Size = new Size(39, 23)
             };
             progress = new CheckBox
             {
                 Name = "ShowProgress", Text = "진행 막대 표시", Checked = settings.ShowProgress,
-                AutoSize = true, Location = new Point(18, 266), TabIndex = 6
+                AutoSize = true, Location = new Point(18, 307), TabIndex = 9
             };
             progressColor = settings.ProgressColor;
             swatch = new Label
             {
                 Name = "ProgressColorSwatch", AccessibleName = "진행 막대 색", BorderStyle = BorderStyle.FixedSingle,
-                Location = new Point(150, 265), Size = new Size(22, 22)
+                Location = new Point(150, 306), Size = new Size(22, 22)
             };
             pickColor = new Button
             {
-                Name = "ProgressColor", Text = "색 변경", Location = new Point(178, 262), Size = new Size(64, 28), TabIndex = 7
+                Name = "ProgressColor", Text = "색 변경", Location = new Point(178, 303), Size = new Size(64, 28), TabIndex = 10
             };
             resetColor = new Button
             {
-                Name = "ResetProgressColor", Text = "기본값", Location = new Point(246, 262), Size = new Size(58, 28), TabIndex = 8
+                Name = "ResetProgressColor", Text = "기본값", Location = new Point(246, 303), Size = new Size(58, 28), TabIndex = 11
             };
             PickProgressColor = ShowColorDialog;
             pickColor.Click += delegate
@@ -793,30 +840,30 @@ namespace OffClock
             resetColor.Click += delegate { SetProgressColor(Color.Empty); };
             var notify = new CheckBox
             {
-                Name = "NotifyAtEnd", Text = "퇴근 시간에 화면 알림 (무음)", Checked = settings.NotifyAtEnd,
-                AutoSize = true, Location = new Point(18, 298), TabIndex = 9
+                Name = "NotifyAtEnd", Text = "퇴근·점심 시간에 화면 알림 (무음)", Checked = settings.NotifyAtEnd,
+                AutoSize = true, Location = new Point(18, 339), TabIndex = 12
             };
             var pinInside = new CheckBox
             {
                 Name = "PinInside", Text = "가로 작업표시줄 안에 고정", Checked = settings.PinInside,
-                AutoSize = true, Location = new Point(18, 330), TabIndex = 10
+                AutoSize = true, Location = new Point(18, 371), TabIndex = 13
             };
             startAtLogin = new CheckBox
             {
                 Name = "StartAtLogin", Text = "Windows 로그인 시 자동 시작", Checked = registeredAtLogin,
-                AutoSize = true, Location = new Point(18, 362), TabIndex = 11
+                AutoSize = true, Location = new Point(18, 403), TabIndex = 14
             };
-            var salaryLabel = new Label { Text = "세전 연봉 (원)", AutoSize = true, Location = new Point(18, 403) };
+            var salaryLabel = new Label { Text = "세전 연봉 (원)", AutoSize = true, Location = new Point(18, 444) };
             var salary = new TextBox
             {
-                Name = "AnnualSalary", AccessibleName = "세전 연봉 (원)", Location = new Point(150, 398),
-                Width = 154, MaxLength = 20, TextAlign = HorizontalAlignment.Right, TabIndex = 12,
+                Name = "AnnualSalary", AccessibleName = "세전 연봉 (원)", Location = new Point(150, 439),
+                Width = 154, MaxLength = 20, TextAlign = HorizontalAlignment.Right, TabIndex = 15,
                 Text = settings.AnnualSalary == 0 ? "" : settings.AnnualSalary.ToString("N0", CultureInfo.InvariantCulture)
             };
             var salaryInKorean = new Label
             {
                 Name = "AnnualSalaryInKorean", ForeColor = SystemColors.GrayText, TextAlign = ContentAlignment.TopRight,
-                Location = new Point(18, 424), Size = new Size(286, 36)
+                Location = new Point(18, 465), Size = new Size(286, 36)
             };
             EventHandler refreshSalary = delegate
             {
@@ -829,12 +876,12 @@ namespace OffClock
             var autoUpdates = new CheckBox
             {
                 Name = "AutoUpdates", Text = "자동 업데이트", Checked = settings.AutoUpdate,
-                AutoSize = true, Location = new Point(18, 473), TabIndex = 13
+                AutoSize = true, Location = new Point(18, 514), TabIndex = 16
             };
             var checkUpdate = new Button
             {
-                Name = "CheckForUpdate", Text = "업데이트 확인", Location = new Point(192, 467),
-                Size = new Size(112, 30), TabIndex = 14
+                Name = "CheckForUpdate", Text = "업데이트 확인", Location = new Point(192, 508),
+                Size = new Size(112, 30), TabIndex = 17
             };
             checkUpdate.Click += delegate { if (CheckForUpdate != null) CheckForUpdate(); };
             transparency.ValueChanged += delegate
@@ -855,31 +902,33 @@ namespace OffClock
             RefreshProgressColor();
             start.TabIndex = 0;
             end.TabIndex = 1;
-            display.TabIndex = 2;
-            monitor.TabIndex = 3;
-            theme.TabIndex = 4;
+            display.TabIndex = 5;
+            monitor.TabIndex = 6;
+            theme.TabIndex = 7;
             feedback = new Label
             {
                 Name = "Feedback",
                 Text = "퇴근 시간이 출근보다 이르면 다음 날로 계산합니다.",
                 AutoSize = true,
-                Location = new Point(18, 511)
+                Location = new Point(18, 552)
             };
-            var save = new Button { Text = "저장", Location = new Point(225, 545), Size = new Size(79, 28), TabIndex = 16 };
+            var save = new Button { Text = "저장", Location = new Point(225, 586), Size = new Size(79, 28), TabIndex = 19 };
             var cancel = new Button
             {
-                Text = "취소", Location = new Point(138, 545), Size = new Size(79, 28), TabIndex = 15,
+                Text = "취소", Location = new Point(138, 586), Size = new Size(79, 28), TabIndex = 18,
                 DialogResult = DialogResult.Cancel
             };
             save.Click += delegate
             {
-                Save(start.Value.TimeOfDay, end.Value.TimeOfDay, (DisplayMode)display.SelectedIndex,
+                Save(start.Value.TimeOfDay, end.Value.TimeOfDay,
+                    new LunchBreak(lunchEnabled.Checked, lunchStart.Value.TimeOfDay, lunchEnd.Value.TimeOfDay),
+                    (DisplayMode)display.SelectedIndex,
                     ((MonitorOption)monitor.SelectedItem).Device, transparency.Value, progress.Checked,
                     notify.Checked, SelectedTheme, pinInside.Checked, salary.Text, autoUpdates.Checked, progressColor);
             };
             Controls.AddRange(new Control[]
             {
-                start, end, transparencyLabel, transparency, percentage, progress, swatch, pickColor, resetColor,
+                start, end, lunchEnabled, lunchStart, lunchDash, lunchEnd, transparencyLabel, transparency, percentage, progress, swatch, pickColor, resetColor,
                 notify, pinInside, startAtLogin,
                 salaryLabel, salary, salaryInKorean, autoUpdates, checkUpdate, feedback, cancel, save
             });
@@ -916,6 +965,27 @@ namespace OffClock
             {
                 return picker.ShowDialog(this) == DialogResult.OK ? picker.Color : (Color?)null;
             }
+        }
+
+        protected override void OnLoad(EventArgs e)
+        {
+            base.OnLoad(e);
+            // Small screens at high scaling: scroll rather than push Save off the screen.
+            Rectangle area = Screen.FromPoint(Cursor.Position).WorkingArea;
+            if (Height <= area.Height) return;
+            AutoScroll = true;
+            Width += SystemInformation.VerticalScrollBarWidth;
+            Height = area.Height;
+            CenterToScreen();
+        }
+
+        private static DateTimePicker LunchPicker(string name, string label, TimeSpan time, int x)
+        {
+            return new DateTimePicker
+            {
+                Name = name, AccessibleName = label, Format = DateTimePickerFormat.Custom, CustomFormat = "HH:mm",
+                ShowUpDown = true, Location = new Point(x, 104), Size = new Size(68, 26), Value = DateTime.Today.Add(time)
+            };
         }
 
         private DateTimePicker TimePicker(TimeSpan time, string name, int y)
@@ -989,7 +1059,7 @@ namespace OffClock
             public override string ToString() { return label; }
         }
 
-        private void Save(TimeSpan start, TimeSpan end, DisplayMode display, string monitor,
+        private void Save(TimeSpan start, TimeSpan end, LunchBreak lunch, DisplayMode display, string monitor,
             int translucency, bool showProgress, bool notifyAtEnd, ClockTheme selectedTheme, bool pinInside,
             string salaryText, bool autoUpdates, Color selectedProgressColor)
         {
@@ -1000,7 +1070,7 @@ namespace OffClock
                     throw new ArgumentException("세전 연봉을 원 단위 숫자로 입력하세요.");
                 if (display == DisplayMode.Earnings && salary == 0)
                     throw new ArgumentException("오늘 급여를 표시하려면 세전 연봉을 입력하세요.");
-                StoreSettings(new ClockSettings(new Schedule(start, end), display, monitor,
+                StoreSettings(new ClockSettings(new Schedule(start, end, lunch), display, monitor,
                     translucency, showProgress, notifyAtEnd, selectedTheme, pinInside, salary, autoUpdates,
                     selectedProgressColor));
                 DialogResult = DialogResult.OK;

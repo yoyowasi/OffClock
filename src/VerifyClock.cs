@@ -32,7 +32,14 @@ namespace OffClock
                 VerifyProgressColor(args[0]);
                 VerifyFinishReminder();
                 VerifyFinishNotice();
-                Console.WriteLine("Verified countdown, settings, placement, power-resume messages, appearance, and silent notifications.");
+                VerifyLunchBreak();
+                VerifyLunchSettings(args[0]);
+                VerifyLunchDialog();
+                VerifyLunchReminder();
+                VerifyLunchNotice();
+                VerifyMilestones();
+                VerifyLunchStrip();
+                Console.WriteLine("Verified countdown, lunch break, settings, placement, power-resume messages, appearance, and silent notifications.");
                 return 0;
             }
             catch (Exception error)
@@ -236,9 +243,10 @@ namespace OffClock
                     "Saved appearance or reminder settings were lost");
 
                 string[] savedLines = File.ReadAllLines(path);
-                Require(savedLines.Length == 12 && savedLines[0] == "09:20" && savedLines[1] == "18:30" &&
-                    savedLines[2] == "Earnings" && savedLines[3] == target.DeviceName && savedLines[11] == "Theme",
-                    "Existing settings fields must keep their positions and line 11 must default to Theme");
+                Require(savedLines.Length == 13 && savedLines[0] == "09:20" && savedLines[1] == "18:30" &&
+                    savedLines[2] == "Earnings" && savedLines[3] == target.DeviceName && savedLines[11] == "Theme" &&
+                    savedLines[12] == "Off 12:00-13:00",
+                    "Existing settings fields must keep their positions, line 11 must default to Theme and line 12 to the lunch default");
                 string savedUpdateMode = savedLines[10];
                 savedLines[10] = "True";
                 File.WriteAllLines(path, savedLines);
@@ -496,7 +504,7 @@ namespace OffClock
                     Require(dialog.ShowDialog() == DialogResult.OK, "Save did not close settings");
                 }
                 string[] lines = File.ReadAllLines(path);
-                Require(lines.Length == 12 && lines[11] == "#123456", "Custom progress color must be saved as #RRGGBB");
+                Require(lines.Length == 13 && lines[11] == "#123456", "Custom progress color must be saved as #RRGGBB");
                 ClockSettings saved = store.Load();
                 Require(saved.Theme == ClockTheme.Rabbit && saved.ProgressColor.ToArgb() == customArgb,
                     "Character theme and custom color must round trip");
@@ -783,8 +791,8 @@ namespace OffClock
             using (var dialog = new UpdateDialog(true))
             {
                 var notes = (TextBox)dialog.Controls["ReleaseNotes"];
-                Require(notes.ReadOnly && notes.Multiline && notes.Text.Contains("캐릭터 테마") &&
-                    notes.Text.Contains("진행 막대 색"), "Show bundled release notes after installing");
+                Require(notes.ReadOnly && notes.Multiline && notes.Text.Contains("점심시간") &&
+                    notes.Text.Contains("점심 끝까지"), "Show bundled release notes after installing");
             }
             Require(ReleaseUpdate.FromJson(metadata, new Version(1, 2, 0, 0)) == null, "Do not reinstall the same version");
             Require(ReleaseUpdate.FromJson(metadata.Replace("v1.2.0", "v1.0.0"), new Version(1, 1, 0, 0)) == null,
@@ -866,6 +874,534 @@ namespace OffClock
             finally
             {
                 if (Directory.Exists(root)) Directory.Delete(root, true);
+            }
+        }
+
+        private static TimeSpan T(int hour, int minute)
+        {
+            return new TimeSpan(hour, minute, 0);
+        }
+
+        private static bool ThrowsArgument(Action action)
+        {
+            try { action(); }
+            catch (ArgumentException) { return true; }
+            return false;
+        }
+
+        private static void CheckAt(string name, Schedule schedule, DateTime now, CountdownTarget target,
+            TimeSpan remaining, double progress)
+        {
+            Countdown countdown = schedule.At(now);
+            Require(countdown.Target == target && countdown.Remaining == remaining &&
+                Math.Abs(countdown.Progress - progress) < 0.0001 &&
+                countdown.Finished == (target == CountdownTarget.Leave && remaining == TimeSpan.Zero),
+                name + " (target " + countdown.Target + ", remaining " + countdown.Remaining + ", progress " + countdown.Progress + ")");
+        }
+
+        private static void RequireLunch(LunchBreak lunch, bool enabled, TimeSpan start, TimeSpan end, string scenario)
+        {
+            Require(lunch != null && lunch.Enabled == enabled && lunch.Start == start && lunch.End == end, scenario);
+        }
+
+        private static void VerifyLunchBreak()
+        {
+            LunchBreak standard = LunchBreak.Default;
+            RequireLunch(standard, false, T(12, 0), T(13, 0), "Default lunch is disabled 12:00-13:00");
+            Require(standard.Format() == "Off 12:00-13:00", "Default lunch format");
+            Require(new LunchBreak(true, T(11, 30), T(12, 45)).Format() == "On 11:30-12:45", "Enabled lunch format");
+            Require(new LunchBreak(false, T(9, 5), T(10, 0)).Format() == "Off 09:05-10:00", "Disabled lunch format pads HH:mm");
+            RequireLunch(LunchBreak.Parse("On 11:30-12:45"), true, T(11, 30), T(12, 45), "Parse an enabled lunch");
+            RequireLunch(LunchBreak.Parse("Off 09:05-10:00"), false, T(9, 5), T(10, 0), "Parse a disabled lunch");
+            RequireLunch(LunchBreak.Parse(new LunchBreak(true, T(2, 0), T(2, 30)).Format()), true, T(2, 0), T(2, 30),
+                "Format then Parse round trip");
+            Require(standard.Length == TimeSpan.FromHours(1) && new LunchBreak(true, T(11, 30), T(12, 45)).Length == T(1, 15) &&
+                new LunchBreak(true, T(23, 30), T(0, 30)).Length == TimeSpan.FromHours(1), "Lunch length wraps across midnight");
+            foreach (string bad in new[] { null, "", "garbage", "On 12:00", "12:00-13:00", "On 25:00-26:00", "On 12:00-13:99", "On 12:00-13:00 extra", "Maybe 12:00-13:00" })
+                RequireLunch(LunchBreak.Parse(bad), false, T(12, 0), T(13, 0), "Invalid lunch text must parse as Default: " + (bad ?? "null"));
+
+            // Schedule constructor validation
+            var lunchNoon = new LunchBreak(true, T(12, 0), T(13, 0));
+            var day = new Schedule(T(9, 0), T(18, 0), lunchNoon);
+            Require(day.Lunch.Enabled && day.Lunch.Start == T(12, 0) && day.Lunch.End == T(13, 0), "Schedule keeps its lunch");
+            RequireLunch(new Schedule(T(9, 0), T(18, 0)).Lunch, false, T(12, 0), T(13, 0), "Schedule without lunch uses Default");
+            RequireLunch(new Schedule(T(9, 0), T(18, 0), null).Lunch, false, T(12, 0), T(13, 0), "Null lunch uses Default");
+            RequireLunch(Schedule.Default.Lunch, false, T(12, 0), T(13, 0), "Schedule.Default has the default lunch");
+            Require(ThrowsArgument(delegate { new Schedule(T(9, 0), T(18, 0), new LunchBreak(true, T(12, 0), T(12, 0))); }),
+                "Zero-length lunch must throw");
+            Require(ThrowsArgument(delegate { new Schedule(T(9, 0), T(18, 0), new LunchBreak(true, T(8, 0), T(9, 30))); }),
+                "Lunch starting before the shift must throw");
+            Require(ThrowsArgument(delegate { new Schedule(T(9, 0), T(18, 0), new LunchBreak(true, T(17, 30), T(18, 30))); }),
+                "Lunch ending after the shift must throw");
+            Require(ThrowsArgument(delegate { new Schedule(T(9, 0), T(18, 0), new LunchBreak(true, T(19, 0), T(20, 0))); }),
+                "Lunch after the shift must throw");
+            Require(ThrowsArgument(delegate { new Schedule(T(9, 0), T(18, 0), new LunchBreak(true, T(13, 0), T(12, 0))); }),
+                "Lunch wrapping past the shift must throw");
+            Require(ThrowsArgument(delegate { new Schedule(T(9, 0), T(18, 0), new LunchBreak(true, T(9, 0), T(18, 0))); }),
+                "Lunch as long as the whole shift must throw");
+            Require(ThrowsArgument(delegate { new Schedule(T(9, 0), T(18, 0), new LunchBreak(true, T(10, 0), T(19, 0))); }),
+                "Lunch crossing the shift end must throw");
+            var night = new Schedule(T(22, 0), T(6, 0), new LunchBreak(true, T(2, 0), T(2, 30)));
+            Require(night.Lunch.Enabled, "Lunch after midnight inside an overnight shift is valid");
+            Require(new Schedule(T(22, 0), T(6, 0), new LunchBreak(true, T(23, 30), T(0, 30))).Lunch.Enabled,
+                "Lunch across midnight inside an overnight shift is valid");
+            Require(ThrowsArgument(delegate { new Schedule(T(22, 0), T(6, 0), new LunchBreak(true, T(7, 0), T(8, 0))); }),
+                "Lunch outside an overnight shift must throw");
+            Require(ThrowsArgument(delegate { new Schedule(T(22, 0), T(6, 0), new LunchBreak(true, T(21, 30), T(22, 30))); }),
+                "Lunch starting before an overnight shift must throw");
+            Require(!ThrowsArgument(delegate { new Schedule(T(9, 0), T(18, 0), new LunchBreak(false, T(7, 0), T(8, 0))); }) &&
+                !ThrowsArgument(delegate { new Schedule(T(9, 0), T(18, 0), new LunchBreak(false, T(12, 0), T(12, 0))); }) &&
+                !ThrowsArgument(delegate { new Schedule(T(22, 0), T(6, 0), new LunchBreak(false, T(7, 0), T(8, 0))); }),
+                "A disabled lunch never throws");
+
+            // CountdownTarget and stages
+            Require((int)CountdownTarget.Leave == 0 && Enum.GetValues(typeof(CountdownTarget)).Length == 3, "CountdownTarget order");
+            Require(new Countdown(TimeSpan.FromHours(1), 0.5).Target == CountdownTarget.Leave, "Default target is Leave");
+            Require(new Countdown(TimeSpan.FromHours(1), 0.5, CountdownTarget.Lunch).Target == CountdownTarget.Lunch, "Lunch target");
+            Require(new Countdown(TimeSpan.Zero, 1).Finished && new Countdown(TimeSpan.Zero, 1, CountdownTarget.Leave).Finished,
+                "Leave with nothing left is finished");
+            Require(!new Countdown(TimeSpan.Zero, 0.5, CountdownTarget.Lunch).Finished &&
+                !new Countdown(TimeSpan.Zero, 0.5, CountdownTarget.LunchEnd).Finished,
+                "Only the Leave target can be finished");
+            Require(!new Countdown(TimeSpan.FromMinutes(1), 0.5, CountdownTarget.Leave).Finished, "Time left is not finished");
+            Require(new Countdown(TimeSpan.FromMinutes(31), 0.5, CountdownTarget.Lunch).Stage == CountdownStage.Running &&
+                new Countdown(TimeSpan.FromMinutes(30), 0.5, CountdownTarget.Lunch).Stage == CountdownStage.Soon &&
+                new Countdown(TimeSpan.FromMinutes(11), 0.5, CountdownTarget.Lunch).Stage == CountdownStage.Soon &&
+                new Countdown(TimeSpan.FromMinutes(10), 0.5, CountdownTarget.Lunch).Stage == CountdownStage.Soon &&
+                new Countdown(TimeSpan.FromMinutes(5), 0.5, CountdownTarget.Lunch).Stage == CountdownStage.Soon &&
+                new Countdown(TimeSpan.FromSeconds(1), 0.5, CountdownTarget.Lunch).Stage == CountdownStage.Soon,
+                "A Lunch target never becomes Urgent");
+            foreach (CountdownTarget kept in new[] { CountdownTarget.Leave, CountdownTarget.LunchEnd })
+                Require(new Countdown(TimeSpan.FromMinutes(31), 0.5, kept).Stage == CountdownStage.Running &&
+                    new Countdown(TimeSpan.FromMinutes(30), 0.5, kept).Stage == CountdownStage.Soon &&
+                    new Countdown(TimeSpan.FromMinutes(11), 0.5, kept).Stage == CountdownStage.Soon &&
+                    new Countdown(TimeSpan.FromMinutes(10), 0.5, kept).Stage == CountdownStage.Urgent &&
+                    new Countdown(TimeSpan.FromMinutes(5), 0.5, kept).Stage == CountdownStage.Urgent,
+                    kept + " target keeps the existing stage thresholds");
+            Require(new Countdown(TimeSpan.Zero, 1, CountdownTarget.Leave).Stage == CountdownStage.Finished, "Finished stage");
+
+            // Schedule.At with a daytime lunch
+            foreach (DateTime date in new[] { new DateTime(2026, 11, 20), new DateTime(2026, 11, 21), new DateTime(2027, 2, 28) })
+            {
+                string day0 = date.ToString("yyyy-MM-dd") + " ";
+                CheckAt(day0 + "08:00", day, date.AddHours(8), CountdownTarget.Lunch, TimeSpan.FromHours(4), 0);
+                CheckAt(day0 + "09:00", day, date.AddHours(9), CountdownTarget.Lunch, TimeSpan.FromHours(3), 0);
+                CheckAt(day0 + "10:30", day, date.AddHours(10.5), CountdownTarget.Lunch, TimeSpan.FromMinutes(90), 1.5 / 8);
+                CheckAt(day0 + "12:00", day, date.AddHours(12), CountdownTarget.LunchEnd, TimeSpan.FromHours(1), 3.0 / 8);
+                CheckAt(day0 + "12:30", day, date.AddHours(12.5), CountdownTarget.LunchEnd, TimeSpan.FromMinutes(30), 3.0 / 8);
+                CheckAt(day0 + "13:00", day, date.AddHours(13), CountdownTarget.Leave, TimeSpan.FromHours(5), 3.0 / 8);
+                CheckAt(day0 + "15:00", day, date.AddHours(15), CountdownTarget.Leave, TimeSpan.FromHours(3), 5.0 / 8);
+                CheckAt(day0 + "18:00", day, date.AddHours(18), CountdownTarget.Leave, TimeSpan.Zero, 1);
+                CheckAt(day0 + "20:00", day, date.AddHours(20), CountdownTarget.Leave, TimeSpan.Zero, 1);
+            }
+
+            // Overnight lunch
+            var d = new DateTime(2026, 11, 20);
+            CheckAt("Overnight 23:00", night, d.AddHours(23), CountdownTarget.Lunch, TimeSpan.FromHours(3), 1.0 / 7.5);
+            CheckAt("Overnight 02:15 next day", night, d.AddDays(1).AddMinutes(135), CountdownTarget.LunchEnd,
+                TimeSpan.FromMinutes(15), 4.0 / 7.5);
+            CheckAt("Overnight 03:00 next day", night, d.AddDays(1).AddHours(3), CountdownTarget.Leave, TimeSpan.FromHours(3), 4.5 / 7.5);
+            CheckAt("Overnight 06:00 next day", night, d.AddDays(1).AddHours(6), CountdownTarget.Leave, TimeSpan.Zero, 1);
+
+            // Disabled or absent lunch changes nothing
+            var disabled = new Schedule(T(9, 0), T(18, 0), new LunchBreak(false, T(12, 0), T(13, 0)));
+            foreach (Schedule plain in new[] { disabled, new Schedule(T(9, 0), T(18, 0)) })
+            {
+                CheckAt("No lunch 08:00", plain, d.AddHours(8), CountdownTarget.Leave, TimeSpan.FromHours(10), 0);
+                CheckAt("No lunch 12:30", plain, d.AddHours(12.5), CountdownTarget.Leave, TimeSpan.FromHours(5.5), 3.5 / 9);
+                CheckAt("No lunch 14:00", plain, d.AddHours(14), CountdownTarget.Leave, TimeSpan.FromHours(4), 5.0 / 9);
+                CheckAt("No lunch 18:00", plain, d.AddHours(18), CountdownTarget.Leave, TimeSpan.Zero, 1);
+            }
+
+            // Pay follows progress, which pauses during lunch
+            const long salary = 50400000;
+            var workday = new DateTime(2026, 11, 23);
+            Require(PayEstimate.At(salary, workday, day.At(workday.AddHours(14)).Progress) == 100000, "Pay at 14:00 with lunch");
+            Require(PayEstimate.At(salary, workday, day.At(workday.AddHours(12.5)).Progress) == 75000, "Pay pauses during lunch");
+            Require(PayEstimate.At(salary, workday, day.At(workday.AddHours(18)).Progress) == 200000, "Full pay at the end with lunch");
+        }
+
+        private static void VerifyLunchSettings(string folder)
+        {
+            string path = Path.Combine(folder, "lunch-" + Guid.NewGuid().ToString("N") + ".txt");
+            var store = new SettingsFile(path);
+            try
+            {
+                var lunch = new LunchBreak(true, T(11, 30), T(12, 30));
+                var original = new ClockSettings(new Schedule(T(9, 0), T(18, 0), lunch), DisplayMode.Minutes, "lunch-monitor");
+                store.Save(original);
+                string[] lines = File.ReadAllLines(path);
+                Require(lines.Length == 13 && lines[0] == "09:00" && lines[1] == "18:00" && lines[2] == "Minutes" &&
+                    lines[3] == "lunch-monitor" && lines[12] == "On 11:30-12:30", "Lunch must be saved on line 12");
+                ClockSettings loaded = store.Load();
+                RequireLunch(loaded.Schedule.Lunch, true, T(11, 30), T(12, 30), "Saved lunch must round trip");
+                RequireSameExceptColor(loaded, original, "Lunch round trip");
+
+                File.WriteAllLines(path, lines.Take(12));
+                ClockSettings oldFile = store.Load();
+                RequireLunch(oldFile.Schedule.Lunch, false, T(12, 0), T(13, 0), "A twelve-line file loads the default lunch");
+                RequireSameExceptColor(oldFile, original, "Twelve-line settings");
+
+                File.WriteAllLines(path, new[] { "09:20", "18:30" });
+                RequireLunch(store.Load().Schedule.Lunch, false, T(12, 0), T(13, 0), "A legacy file loads the default lunch");
+
+                string[] broken = (string[])lines.Clone();
+                broken[12] = "garbage";
+                File.WriteAllLines(path, broken);
+                ClockSettings invalid = store.Load();
+                RequireLunch(invalid.Schedule.Lunch, false, T(12, 0), T(13, 0), "Invalid lunch text loads the default lunch");
+                RequireSameExceptColor(invalid, original, "Invalid lunch text");
+
+                broken[12] = "On 07:00-08:00";
+                File.WriteAllLines(path, broken);
+                ClockSettings outside = store.Load();
+                RequireLunch(outside.Schedule.Lunch, false, T(7, 0), T(8, 0),
+                    "A stored lunch outside the shift loads disabled with its times");
+                RequireSameExceptColor(outside, original, "Lunch outside the shift");
+
+                broken[12] = "On 12:00-12:00";
+                File.WriteAllLines(path, broken);
+                ClockSettings empty = store.Load();
+                Require(!empty.Schedule.Lunch.Enabled && empty.Schedule.Start == T(9, 0), "A zero-length stored lunch loads disabled");
+
+                var overnight = new ClockSettings(new Schedule(T(22, 0), T(6, 0), new LunchBreak(true, T(2, 0), T(2, 30))), DisplayMode.Clock);
+                store.Save(overnight);
+                RequireLunch(store.Load().Schedule.Lunch, true, T(2, 0), T(2, 30), "An overnight lunch must round trip");
+
+                store.Save(ClockSettings.Default);
+                string[] defaults = File.ReadAllLines(path);
+                Require(defaults.Length == 13 && defaults[12] == "Off 12:00-13:00", "Default settings write the default lunch");
+            }
+            finally { File.Delete(path); }
+        }
+
+        private static ClockSettings LunchSettings(bool enabled, TimeSpan start, TimeSpan end)
+        {
+            return new ClockSettings(new Schedule(T(9, 0), T(18, 0), new LunchBreak(enabled, start, end)), DisplayMode.Clock);
+        }
+
+        private static void VerifyLunchDialog()
+        {
+            int storeCalls = 0;
+            ClockSettings stored = null;
+            DialogResult firstResult;
+            bool pickersFollowCheck = false, pickersFollowUncheck = false, stayedOpen = false;
+            int callsAfterInvalid = -1;
+            string feedbackAfterInvalid = "";
+            using (var dialog = new ClockSettingsDialog(ClockSettings.Default, null))
+            {
+                var enabled = (CheckBox)dialog.Controls["LunchEnabled"];
+                var lunchStart = (DateTimePicker)dialog.Controls["LunchStart"];
+                var lunchEnd = (DateTimePicker)dialog.Controls["LunchEnd"];
+                var feedback = (Label)dialog.Controls["Feedback"];
+                Require(enabled.Text == "점심시간" && !enabled.Checked && !lunchStart.Enabled && !lunchEnd.Enabled &&
+                    lunchStart.Value.TimeOfDay == T(12, 0) && lunchEnd.Value.TimeOfDay == T(13, 0),
+                    "Default dialog shows a disabled lunch 12:00-13:00");
+                dialog.StoreSettings = delegate(ClockSettings settings) { storeCalls++; stored = settings; };
+                dialog.Shown += delegate
+                {
+                    enabled.Checked = true;
+                    pickersFollowCheck = lunchStart.Enabled && lunchEnd.Enabled;
+                    lunchStart.Value = DateTime.Today.Add(T(7, 0));
+                    lunchEnd.Value = DateTime.Today.Add(T(8, 0));
+                    dialog.AcceptButton.PerformClick();
+                    stayedOpen = dialog.DialogResult == DialogResult.None;
+                    callsAfterInvalid = storeCalls;
+                    feedbackAfterInvalid = feedback.Text;
+                    enabled.Checked = false;
+                    pickersFollowUncheck = !lunchStart.Enabled && !lunchEnd.Enabled;
+                    enabled.Checked = true;
+                    lunchStart.Value = DateTime.Today.Add(T(11, 30));
+                    lunchEnd.Value = DateTime.Today.Add(T(12, 30));
+                    dialog.AcceptButton.PerformClick();
+                };
+                firstResult = dialog.ShowDialog();
+            }
+            Require(pickersFollowCheck && pickersFollowUncheck, "Lunch pickers are enabled only while the checkbox is checked");
+            Require(stayedOpen && callsAfterInvalid == 0, "An out-of-shift lunch must keep the dialog open and not store");
+            Require(feedbackAfterInvalid.Contains("점심"), "An out-of-shift lunch must explain itself in the feedback label");
+            Require(firstResult == DialogResult.OK && storeCalls == 1 && stored != null, "A valid lunch must be stored once");
+            RequireLunch(stored.Schedule.Lunch, true, T(11, 30), T(12, 30), "Saved lunch values");
+
+            ClockSettings second = null;
+            bool reopened = false, reopenedPickersOff = false;
+            DialogResult secondResult;
+            using (var dialog = new ClockSettingsDialog(stored, null))
+            {
+                var enabled = (CheckBox)dialog.Controls["LunchEnabled"];
+                var lunchStart = (DateTimePicker)dialog.Controls["LunchStart"];
+                var lunchEnd = (DateTimePicker)dialog.Controls["LunchEnd"];
+                reopened = enabled.Checked && lunchStart.Enabled && lunchEnd.Enabled &&
+                    lunchStart.Value.TimeOfDay == T(11, 30) && lunchEnd.Value.TimeOfDay == T(12, 30);
+                dialog.StoreSettings = delegate(ClockSettings settings) { second = settings; };
+                dialog.Shown += delegate
+                {
+                    enabled.Checked = false;
+                    reopenedPickersOff = !lunchStart.Enabled && !lunchEnd.Enabled;
+                    dialog.AcceptButton.PerformClick();
+                };
+                secondResult = dialog.ShowDialog();
+            }
+            Require(reopened, "Reopening must show the saved lunch");
+            Require(secondResult == DialogResult.OK && second != null && reopenedPickersOff, "Unchecked lunch must save");
+            RequireLunch(second.Schedule.Lunch, false, T(11, 30), T(12, 30), "An unchecked lunch keeps its picker times");
+
+            ClockSettings third = null;
+            DialogResult thirdResult;
+            using (var dialog = new ClockSettingsDialog(ClockSettings.Default, null))
+            {
+                var lunchStart = (DateTimePicker)dialog.Controls["LunchStart"];
+                var lunchEnd = (DateTimePicker)dialog.Controls["LunchEnd"];
+                dialog.StoreSettings = delegate(ClockSettings settings) { third = settings; };
+                dialog.Shown += delegate
+                {
+                    lunchStart.Value = DateTime.Today.Add(T(7, 0));
+                    lunchEnd.Value = DateTime.Today.Add(T(8, 0));
+                    dialog.AcceptButton.PerformClick();
+                };
+                thirdResult = dialog.ShowDialog();
+            }
+            Require(thirdResult == DialogResult.OK && third != null, "A disabled lunch outside the shift must not block saving");
+            RequireLunch(third.Schedule.Lunch, false, T(7, 0), T(8, 0), "A disabled lunch keeps its times");
+
+            ClockSettings fourth = null;
+            DialogResult fourthResult;
+            bool disabledShown = false;
+            using (var dialog = new ClockSettingsDialog(LunchSettings(false, T(10, 0), T(10, 45)), null))
+            {
+                var enabled = (CheckBox)dialog.Controls["LunchEnabled"];
+                var lunchStart = (DateTimePicker)dialog.Controls["LunchStart"];
+                var lunchEnd = (DateTimePicker)dialog.Controls["LunchEnd"];
+                disabledShown = !enabled.Checked && !lunchStart.Enabled && !lunchEnd.Enabled &&
+                    lunchStart.Value.TimeOfDay == T(10, 0) && lunchEnd.Value.TimeOfDay == T(10, 45);
+                dialog.StoreSettings = delegate(ClockSettings settings) { fourth = settings; };
+                dialog.Shown += delegate { dialog.AcceptButton.PerformClick(); };
+                fourthResult = dialog.ShowDialog();
+            }
+            Require(disabledShown, "A disabled saved lunch must show its times with unchecked, disabled controls");
+            Require(fourthResult == DialogResult.OK && fourth != null, "Save with an untouched disabled lunch");
+            RequireLunch(fourth.Schedule.Lunch, false, T(10, 0), T(10, 45), "An untouched disabled lunch is kept");
+        }
+
+        private static void VerifyLunchReminder()
+        {
+            TimeSpan noon = T(12, 0);
+            var day = new DateTime(2026, 11, 20);
+            DateTime at = day.Add(noon);
+            var reminder = new FinishReminder(at.AddMinutes(-5));
+            Require(!reminder.ShouldNotify(noon, at.AddTicks(-1)), "Time reminder fired before the time");
+            Require(reminder.ShouldNotify(noon, at), "Time reminder did not fire at the time");
+            Require(!reminder.ShouldNotify(noon, at), "Time reminder repeated at the same instant");
+            Require(!reminder.ShouldNotify(noon, at.AddSeconds(1)), "Time reminder repeated after the time");
+            Require(!reminder.ShouldNotify(noon, at.AddMinutes(-2)), "Time reminder fired on clock rollback");
+            Require(!reminder.ShouldNotify(noon, at.AddSeconds(2)), "Time reminder repeated after crossing the same time again");
+            Require(!reminder.ShouldNotify(noon, at.AddDays(1).AddMinutes(-1)), "Time reminder fired before the next day's time");
+            Require(reminder.ShouldNotify(noon, at.AddDays(1)), "Time reminder did not fire again on the next day");
+
+            var startedAtTime = new FinishReminder(at);
+            Require(!startedAtTime.ShouldNotify(noon, at.AddSeconds(10)), "A launch at the time fired a time reminder");
+            var startedLate = new FinishReminder(at.AddSeconds(10));
+            Require(!startedLate.ShouldNotify(noon, at.AddSeconds(20)), "A late launch fired a time reminder");
+            var resumedInTime = new FinishReminder(at.AddMinutes(-5));
+            Require(resumedInTime.ShouldNotify(noon, at.AddMinutes(1)), "Time reminder missed the one-minute grace boundary");
+            var resumedTooLate = new FinishReminder(at.AddMinutes(-5));
+            Require(!resumedTooLate.ShouldNotify(noon, at.AddMinutes(1).AddTicks(1)), "Time reminder fired after the grace period");
+            var reset = new FinishReminder(at.AddMinutes(-5));
+            reset.Reset(at.AddSeconds(10));
+            Require(!reset.ShouldNotify(noon, at.AddSeconds(20)), "Reset caused a time reminder for a past time");
+
+            DateTime midnight = day.AddDays(1);
+            var overMidnight = new FinishReminder(midnight.AddTicks(-1));
+            Require(overMidnight.ShouldNotify(TimeSpan.Zero, midnight.AddSeconds(10)), "Midnight time reminder missed");
+            Require(!overMidnight.ShouldNotify(TimeSpan.Zero, midnight.AddSeconds(20)), "Midnight time reminder repeated");
+            var lateTime = new FinishReminder(midnight.AddMinutes(-1).AddSeconds(-1));
+            Require(lateTime.ShouldNotify(T(23, 59), midnight), "Time reminder lost a time exactly one minute before midnight");
+
+            // The schedule overload keeps working next to the time overload
+            var viaSchedule = new FinishReminder(at.AddMinutes(-5));
+            Require(viaSchedule.ShouldNotify(new Schedule(T(9, 0), T(12, 0)), at), "Schedule overload still fires at the shift end");
+        }
+
+        private static void VerifyLunchNotice()
+        {
+            Rectangle area = Screen.PrimaryScreen.WorkingArea;
+            using (var notice = new FinishNotice(1, ClockTheme.Light, area))
+                Require(notice.Text == "퇴근 시간이에요", "Default notice title");
+            using (var notice = new FinishNotice(1, ClockTheme.Light, area, "점심시간이에요", "점심시간이 되었습니다."))
+                Require(notice.Text == "점심시간이에요", "Notice must use the given title");
+            using (var notice = new FinishNotice(1.5f, ClockTheme.Dark, area, "점심 끝", "다시 시작해요."))
+                Require(notice.Text == "점심 끝", "Notice title with a scaled dpi");
+        }
+
+        private static void RequireMilestone(MilestoneReminder reminder, Schedule schedule, DateTime now,
+            Milestone expected, string scenario)
+        {
+            Milestone actual = reminder.Check(schedule, now);
+            Require(actual == expected, scenario + " (expected " + expected + ", got " + actual + ")");
+        }
+
+        private static void VerifyMilestones()
+        {
+            var d = new DateTime(2026, 11, 20);
+            var day = new Schedule(T(9, 0), T(18, 0), new LunchBreak(true, T(12, 0), T(13, 0)));
+
+            var all = new MilestoneReminder(d.Add(T(11, 55)));
+            RequireMilestone(all, day, d.Add(new TimeSpan(11, 59, 59)), Milestone.None, "Before the lunch start");
+            RequireMilestone(all, day, d.Add(T(12, 0)), Milestone.LunchStarts, "At the lunch start");
+            RequireMilestone(all, day, d.Add(new TimeSpan(12, 0, 1)), Milestone.None, "One second after the lunch start");
+            RequireMilestone(all, day, d.Add(new TimeSpan(12, 54, 59)), Milestone.None, "Before five minutes to lunch end");
+            RequireMilestone(all, day, d.Add(T(12, 55)), Milestone.LunchEnding, "Five minutes before the lunch end");
+            RequireMilestone(all, day, d.Add(new TimeSpan(12, 55, 1)), Milestone.None, "LunchEnding must not repeat");
+            RequireMilestone(all, day, d.Add(new TimeSpan(17, 59, 59)), Milestone.None, "Before leaving time");
+            RequireMilestone(all, day, d.Add(T(18, 0)), Milestone.Leave, "At leaving time");
+            RequireMilestone(all, day, d.Add(new TimeSpan(18, 0, 1)), Milestone.None, "Leave must not repeat");
+            RequireMilestone(all, day, d.AddDays(1).Add(new TimeSpan(11, 59, 59)), Milestone.None, "Next day before the lunch start");
+            RequireMilestone(all, day, d.AddDays(1).Add(T(12, 0)), Milestone.LunchStarts, "LunchStarts fires again the next day");
+            RequireMilestone(all, day, d.AddDays(1).Add(T(12, 55)), Milestone.LunchEnding, "LunchEnding fires again the next day");
+            RequireMilestone(all, day, d.AddDays(1).Add(T(18, 0)), Milestone.Leave, "Leave fires again the next day");
+
+            var disabled = new Schedule(T(9, 0), T(18, 0), new LunchBreak(false, T(12, 0), T(13, 0)));
+            var off = new MilestoneReminder(d.Add(T(11, 55)));
+            RequireMilestone(off, disabled, d.Add(T(12, 0)), Milestone.None, "A disabled lunch never starts");
+            RequireMilestone(off, disabled, d.Add(T(12, 55)), Milestone.None, "A disabled lunch never ends");
+            RequireMilestone(off, disabled, d.Add(new TimeSpan(17, 59, 59)), Milestone.None, "Disabled lunch before leaving time");
+            RequireMilestone(off, disabled, d.Add(T(18, 0)), Milestone.Leave, "Leave still fires with a disabled lunch");
+            var plain = new MilestoneReminder(d.Add(T(17, 55)));
+            RequireMilestone(plain, Schedule.Default, d.Add(T(18, 0)), Milestone.Leave, "Leave fires without any lunch");
+
+            var tenMinutes = new Schedule(T(9, 0), T(18, 0), new LunchBreak(true, T(12, 0), T(12, 10)));
+            var ten = new MilestoneReminder(d.Add(T(11, 55)));
+            RequireMilestone(ten, tenMinutes, d.Add(T(12, 0)), Milestone.LunchStarts, "A ten-minute lunch still starts");
+            RequireMilestone(ten, tenMinutes, d.Add(T(12, 5)), Milestone.None, "A ten-minute lunch has no LunchEnding");
+            RequireMilestone(ten, tenMinutes, d.Add(T(12, 10)), Milestone.None, "A ten-minute lunch has no end notice");
+
+            var elevenMinutes = new Schedule(T(9, 0), T(18, 0), new LunchBreak(true, T(12, 0), T(12, 11)));
+            var eleven = new MilestoneReminder(d.Add(T(11, 55)));
+            RequireMilestone(eleven, elevenMinutes, d.Add(T(12, 0)), Milestone.LunchStarts, "An eleven-minute lunch starts");
+            RequireMilestone(eleven, elevenMinutes, d.Add(new TimeSpan(12, 5, 59)), Milestone.None, "Before the eleven-minute LunchEnding");
+            RequireMilestone(eleven, elevenMinutes, d.Add(T(12, 6)), Milestone.LunchEnding, "An eleven-minute lunch ends at 12:06");
+
+            var night = new Schedule(T(22, 0), T(6, 0), new LunchBreak(true, T(23, 30), T(0, 2)));
+            var overnight = new MilestoneReminder(d.Add(T(23, 29)));
+            RequireMilestone(overnight, night, d.Add(T(23, 30)), Milestone.LunchStarts, "Overnight lunch start");
+            RequireMilestone(overnight, night, d.Add(new TimeSpan(23, 56, 59)), Milestone.None, "Before the wrapped LunchEnding");
+            RequireMilestone(overnight, night, d.Add(T(23, 57)), Milestone.LunchEnding, "LunchEnding wraps to 23:57");
+            RequireMilestone(overnight, night, d.AddDays(1).Add(new TimeSpan(5, 59, 59)), Milestone.None, "Before the overnight leaving time");
+            RequireMilestone(overnight, night, d.AddDays(1).Add(T(6, 0)), Milestone.Leave, "Overnight leaving time");
+
+            var grace = new MilestoneReminder(d.Add(T(11, 55)));
+            RequireMilestone(grace, day, d.Add(T(12, 1)), Milestone.LunchStarts, "The one-minute grace boundary still fires");
+            var tooLate = new MilestoneReminder(d.Add(T(11, 55)));
+            RequireMilestone(tooLate, day, d.Add(T(12, 1)).AddTicks(1), Milestone.None, "A check past the grace period is silent");
+
+            var slept = new MilestoneReminder(d.Add(T(11, 55)));
+            RequireMilestone(slept, day, d.Add(T(14, 0)), Milestone.None, "A check that slept past the lunch times is silent");
+            RequireMilestone(slept, day, d.Add(new TimeSpan(17, 59, 59)), Milestone.None, "After sleep, before leaving time");
+            RequireMilestone(slept, day, d.Add(T(18, 0)), Milestone.Leave, "Leave still fires after a sleep");
+
+            var resumed = new MilestoneReminder(d.Add(T(11, 59)));
+            RequireMilestone(resumed, day, d.Add(T(12, 6)), Milestone.None,
+                "A late check misses the LunchStarts of six minutes ago");
+
+            var reset = new MilestoneReminder(d.Add(T(11, 55)));
+            reset.Reset(d.Add(new TimeSpan(12, 0, 10)));
+            RequireMilestone(reset, day, d.Add(new TimeSpan(12, 0, 20)), Milestone.None, "Reset after the time passed is silent");
+            RequireMilestone(reset, day, d.Add(T(12, 55)), Milestone.LunchEnding, "Reset keeps later milestones");
+
+            var late = new MilestoneReminder(d.Add(new TimeSpan(12, 0, 10)));
+            RequireMilestone(late, day, d.Add(new TimeSpan(12, 0, 20)), Milestone.None, "Constructed after the lunch start");
+            RequireMilestone(late, day, d.Add(T(12, 55)), Milestone.LunchEnding, "Constructed after the lunch start still gets LunchEnding");
+            RequireMilestone(late, day, d.AddDays(1).Add(T(12, 0)), Milestone.LunchStarts, "Next day after a late construction");
+
+            var clockBack = new MilestoneReminder(d.Add(T(11, 55)));
+            RequireMilestone(clockBack, day, d.Add(T(12, 0)), Milestone.LunchStarts, "Before a clock rollback");
+            RequireMilestone(clockBack, day, d.Add(T(11, 58)), Milestone.None, "Clock rollback is silent");
+            RequireMilestone(clockBack, day, d.Add(new TimeSpan(12, 0, 2)), Milestone.None, "Crossing the same time again is silent");
+        }
+
+        private static bool HasSweat(Bitmap bitmap)
+        {
+            for (int x = 23; x <= 28; x++)
+                for (int y = 7; y <= 13; y++)
+                {
+                    Color pixel = bitmap.GetPixel(x, y);
+                    if (Math.Abs(pixel.R - 91) <= 12 && Math.Abs(pixel.G - 184) <= 12 && Math.Abs(pixel.B - 245) <= 12)
+                        return true;
+                }
+            return false;
+        }
+
+        private static bool SameRegion(Bitmap a, Bitmap b, int left, int right, int top, int bottom)
+        {
+            for (int x = left; x <= right; x++)
+                for (int y = top; y <= bottom; y++)
+                    if (a.GetPixel(x, y).ToArgb() != b.GetPixel(x, y).ToArgb()) return false;
+            return true;
+        }
+
+        private static void VerifyLunchStrip()
+        {
+            ClockPalette palette = ClockPalette.For(ClockTheme.Dark);
+            ClockPalette light = ClockPalette.For(ClockTheme.Light);
+            using (var strip = new ClockStrip(1))
+            using (var leave = new Bitmap(strip.Width, strip.Height))
+            using (var lunch = new Bitmap(strip.Width, strip.Height))
+            using (var lunchEnd = new Bitmap(strip.Width, strip.Height))
+            using (var bitmap = new Bitmap(strip.Width, strip.Height))
+            {
+                strip.SetAppearance(0, true, ClockTheme.Dark);
+                foreach (DisplayMode mode in new[] { DisplayMode.Clock, DisplayMode.Hours, DisplayMode.Seconds })
+                {
+                    strip.Display(new Countdown(TimeSpan.FromHours(1), 0.5, CountdownTarget.Leave), mode);
+                    strip.DrawToBitmap(leave, strip.ClientRectangle);
+                    strip.Display(new Countdown(TimeSpan.FromHours(1), 0.5, CountdownTarget.Lunch), mode);
+                    strip.DrawToBitmap(lunch, strip.ClientRectangle);
+                    strip.Display(new Countdown(TimeSpan.FromHours(1), 0.5, CountdownTarget.LunchEnd), mode);
+                    strip.DrawToBitmap(lunchEnd, strip.ClientRectangle);
+                    Require(!SameRegion(leave, lunch, 31, 88, 6, 22), mode + " label for Lunch must differ from Leave");
+                    Require(!SameRegion(leave, lunchEnd, 31, 88, 6, 22), mode + " label for LunchEnd must differ from Leave");
+                    Require(!SameRegion(lunch, lunchEnd, 31, 88, 6, 22), mode + " label for LunchEnd must differ from Lunch");
+                }
+
+                strip.Display(new Countdown(TimeSpan.FromHours(1), 0.5, CountdownTarget.Leave), DisplayMode.Clock);
+                strip.DrawToBitmap(leave, strip.ClientRectangle);
+                strip.Display(new Countdown(TimeSpan.FromHours(1), 0.5, CountdownTarget.Lunch), DisplayMode.Clock);
+                strip.DrawToBitmap(lunch, strip.ClientRectangle);
+                strip.Display(new Countdown(TimeSpan.FromHours(1), 0.5, CountdownTarget.LunchEnd), DisplayMode.Clock);
+                strip.DrawToBitmap(lunchEnd, strip.ClientRectangle);
+                Require(SameRegion(leave, lunchEnd, 89, 90, 6, 22), "A long lunch label must not reach into the clock digits (LunchEnd)");
+                Require(SameRegion(leave, lunch, 89, 90, 6, 22), "A lunch label must not reach into the clock digits (Lunch)");
+
+                foreach (DisplayMode mode in Enum.GetValues(typeof(DisplayMode)))
+                {
+                    strip.Display(new Countdown(TimeSpan.FromMinutes(5), 0.5, CountdownTarget.Lunch), mode);
+                    strip.DrawToBitmap(bitmap, strip.ClientRectangle);
+                    Require(bitmap.GetPixel(20, 28).ToArgb() == palette.Soon.ToArgb(),
+                        mode + " Lunch target with 5 minutes left must use the Soon color");
+                    strip.Display(new Countdown(TimeSpan.FromMinutes(5), 0.5, CountdownTarget.LunchEnd), mode);
+                    strip.DrawToBitmap(bitmap, strip.ClientRectangle);
+                    Require(bitmap.GetPixel(20, 28).ToArgb() == palette.Urgent.ToArgb(),
+                        mode + " LunchEnd target with 5 minutes left must stay Urgent");
+                }
+                strip.Display(new Countdown(TimeSpan.FromMinutes(40), 0.5, CountdownTarget.Lunch), DisplayMode.Clock);
+                strip.DrawToBitmap(bitmap, strip.ClientRectangle);
+                Require(bitmap.GetPixel(20, 28).ToArgb() == palette.Normal.ToArgb(), "Lunch target with 40 minutes left is Normal");
+
+                strip.SetAppearance(0, true, ClockTheme.Light);
+                strip.Display(new Countdown(TimeSpan.FromMinutes(5), 0.5, CountdownTarget.Lunch), DisplayMode.Clock);
+                strip.DrawToBitmap(bitmap, strip.ClientRectangle);
+                Require(bitmap.GetPixel(20, 28).ToArgb() == light.Soon.ToArgb(), "Light theme Lunch target uses Soon");
+
+                foreach (ClockTheme theme in new[] { ClockTheme.Cat, ClockTheme.Bear, ClockTheme.Rabbit, ClockTheme.Penguin, ClockTheme.Chick })
+                {
+                    strip.SetAppearance(0, true, theme);
+                    strip.Display(new Countdown(TimeSpan.FromMinutes(5), 0.5, CountdownTarget.Lunch), DisplayMode.Clock);
+                    strip.DrawToBitmap(bitmap, strip.ClientRectangle);
+                    Require(!HasSweat(bitmap), theme + " mascot must not sweat before lunch");
+                    strip.Display(new Countdown(TimeSpan.FromMinutes(5), 0.5, CountdownTarget.LunchEnd), DisplayMode.Clock);
+                    strip.DrawToBitmap(bitmap, strip.ClientRectangle);
+                    Require(HasSweat(bitmap), theme + " mascot must still sweat in the last minutes of lunch");
+                }
             }
         }
 
