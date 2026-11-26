@@ -146,11 +146,15 @@ namespace OffClock
                             InlineSpace available = FindInlineSpace(taskbar);
                             if (available != null) measured[taskbar.Window] = available;
                         }
+                        // Routine while Explorer redraws or restarts: retried on the next tick, not worth a log line.
                         catch (ElementNotAvailableException) { }
                         catch (InvalidOperationException) { }
                         catch (COMException) { }
+                        catch (Exception ex) { System.Diagnostics.Trace.WriteLine("FindInlineSpace: " + ex.Message); }
                     }
                 }
+                // This runs on a pool thread, where an escaping exception would end the process.
+                catch (Exception ex) { System.Diagnostics.Trace.WriteLine("RefreshInlineSpace: " + ex.Message); }
                 finally
                 {
                     Volatile.Write(ref spaces, measured);
@@ -370,6 +374,11 @@ namespace OffClock
             IntPtr window = GetForegroundWindow();
             if (window == IntPtr.Zero || window == GetShellWindow() || window == FindWindow("Shell_TrayWnd"))
                 return false;
+            // With the desktop focused the foreground window is WorkerW or Progman, which covers the monitor.
+            var className = new System.Text.StringBuilder(96);
+            GetClassName(window, className, className.Capacity);
+            string windowClass = className.ToString();
+            if (windowClass == "WorkerW" || windowClass == "Progman") return false;
             Rect client;
             var origin = Point.Empty;
             if (!GetClientRect(window, out client) || !ClientToScreen(window, ref origin)) return false;

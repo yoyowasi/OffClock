@@ -145,23 +145,24 @@ namespace OffClock
             string staged = target + "." + id + ".new";
             string backup = target + "." + id + ".bak";
             Version version = null;
-            bool restorable = false;
             bool oldExited = false;
             bool replaced = false;
             try
             {
-                Version installed = ExecutableVersion(target);
-                restorable = true;
                 version = ExecutableVersion(source);
+                Version installed = ExecutableVersion(target);
                 if (version <= installed) throw new InvalidDataException("설치된 버전이 같거나 더 새롭습니다.");
                 if (!WaitForExit(processId)) return 1;
                 oldExited = true;
-                File.Copy(source, staged);
-                File.Replace(staged, target, backup);
+                Retry(delegate { File.Copy(source, staged, true); });
+                Retry(delegate { File.Replace(staged, target, backup); });
                 replaced = true;
                 using (var restarted = Launch(target, "--clean-update " + id + " --show-release-notes"))
-                    if (restarted.WaitForExit(1200))
+                {
+                    // Exit code 0 is a second instance that found the single-instance mutex taken.
+                    if (restarted.WaitForExit(1200) && restarted.ExitCode != 0)
                         throw new InvalidOperationException("새 버전이 시작하자마자 종료되었습니다.");
+                }
                 TryDelete(backup);
                 UpdateFailure.Clear(UpdateFailure.DefaultPath);
                 return 0;
@@ -170,10 +171,18 @@ namespace OffClock
             {
                 // The old app already quit for the install: record why first so auto-update stops retrying
                 // this version, then bring the old app back to show it once.
-                if (!restorable || (!oldExited && !WaitForExit(processId))) return 1;
+                if (!oldExited && !WaitForExit(processId)) return 1;
                 if (version != null) UpdateFailure.Record(UpdateFailure.DefaultPath, version, ex.Message);
                 if (replaced && !Restore(backup, target)) return 1;
-                try { using (Launch(target, "--clean-update " + id + " --update-failed")) { } }
+                // A Replace that failed halfway can leave the old exe only under the backup name.
+                if (!File.Exists(target) && File.Exists(backup))
+                {
+                    try { Retry(delegate { File.Move(backup, target); }); }
+                    catch (IOException) { return 1; }
+                    catch (UnauthorizedAccessException) { return 1; }
+                }
+                if (!File.Exists(target)) return 1;
+                try { using (Launch(target, "--clean-update " + id + (version != null ? " --update-failed" : ""))) { } }
                 catch (Win32Exception) { }
                 catch (InvalidOperationException) { }
                 return 1;
@@ -182,19 +191,67 @@ namespace OffClock
         }
 
         // Scanners often hold a just-exited exe for a moment.
-        private static bool Restore(string backup, string target)
+        private static void Retry(Action action)
         {
             for (int attempt = 1; ; attempt++)
             {
                 try
                 {
-                    File.Replace(backup, target, null);
-                    return true;
+                    action();
+                    return;
                 }
-                catch (IOException) { if (attempt == 5) return false; }
-                catch (UnauthorizedAccessException) { if (attempt == 5) return false; }
+                catch (IOException) { if (attempt == 5) throw; }
+                catch (UnauthorizedAccessException) { if (attempt == 5) throw; }
                 Thread.Sleep(500);
             }
+        }
+
+        private static bool Restore(string backup, string target)
+        {
+            try
+            {
+                Retry(delegate { File.Replace(backup, target, null); });
+                return true;
+            }
+            catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+        }
+
+        // Removes stage folders and .new/.bak files that an interrupted update left behind (older than 1 day).
+        public static void CleanStaleStages()
+        {
+            string exePath = Application.ExecutablePath;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    DateTime limit = DateTime.UtcNow.AddDays(-1);
+                    foreach (string folder in Directory.GetDirectories(Path.GetTempPath(), TempPrefix + "*"))
+                    {
+                        try
+                        {
+                            if (Directory.GetLastWriteTimeUtc(folder) < limit) Directory.Delete(folder, true);
+                        }
+                        catch (Exception ex) { Trace.WriteLine("CleanStaleStages folder failed: " + ex.Message); }
+                    }
+                    string directory = Path.GetDirectoryName(exePath);
+                    var pattern = new Regex(@"\A" + Regex.Escape(Path.GetFileName(exePath)) + @"\.[0-9a-f]{32}\.(new|bak)\z",
+                        RegexOptions.IgnoreCase);
+                    foreach (string file in Directory.GetFiles(directory, Path.GetFileName(exePath) + ".*"))
+                    {
+                        try
+                        {
+                            if (!pattern.IsMatch(Path.GetFileName(file))) continue;
+                            DateTime stamp = File.GetLastWriteTimeUtc(file);
+                            DateTime created = File.GetCreationTimeUtc(file);
+                            if (created > stamp) stamp = created;
+                            if (stamp < limit) File.Delete(file);
+                        }
+                        catch (Exception ex) { Trace.WriteLine("CleanStaleStages file failed: " + ex.Message); }
+                    }
+                }
+                catch (Exception ex) { Trace.WriteLine("CleanStaleStages failed: " + ex.Message); }
+            });
         }
 
         // False while the previous app is still running after 10 seconds.
@@ -457,6 +514,14 @@ namespace OffClock
             status.Text = "v" + version + " 업데이트를 설치하지 못했습니다.\r\n지금 버전으로 계속 실행합니다.";
             ShowNotes((string.IsNullOrWhiteSpace(failure.Reason) ? "" : "원인: " + failure.Reason.Trim() + "\n\n") +
                 "자동 업데이트는 이 버전을 다시 설치하지 않습니다. 설정의 업데이트 확인에서 직접 설치할 수 있습니다.");
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            Font assigned = Font;
+            base.Dispose(disposing);
+            // Form.Dispose does not dispose a Font assigned to it.
+            if (disposing && assigned != null) assigned.Dispose();
         }
 
         private void ShowNotes(string text)

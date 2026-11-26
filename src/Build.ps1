@@ -43,14 +43,16 @@ try {
 $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
 $wpf = Join-Path $framework 'WPF'
 $arguments = @(
-    '/nologo', '/target:winexe', '/codepage:65001', '/optimize+', '/warnaserror+',
+    '/nologo', '/target:winexe', '/codepage:65001', '/optimize+', '/warnaserror+', '/define:TRACE',
     "/out:$OutputPath", "/win32icon:$iconPath", "/win32manifest:$PSScriptRoot\OffClock.manifest",
     "/resource:$PSScriptRoot\ReleaseNotes.md,OffClock.ReleaseNotes",
     '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll',
     '/r:System.Web.Extensions.dll', '/r:System.IO.Compression.dll', '/r:System.IO.Compression.FileSystem.dll',
-    "/r:$wpf\WindowsBase.dll", "/r:$wpf\UIAutomationTypes.dll", "/r:$wpf\UIAutomationClient.dll",
-    "$PSScriptRoot\Clock.cs", "$PSScriptRoot\Theme.cs", "$PSScriptRoot\Taskbar.cs", "$PSScriptRoot\App.cs", "$PSScriptRoot\ReleaseUpdate.cs"
+    "/r:$wpf\WindowsBase.dll", "/r:$wpf\UIAutomationTypes.dll", "/r:$wpf\UIAutomationClient.dll"
 )
+# Every source file except the test entry point, so a new file needs no edit here.
+$arguments += @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter *.cs |
+    Where-Object { $_.Name -ne 'VerifyClock.cs' } | ForEach-Object { $_.FullName })
 $previousTemp = $env:TEMP
 $previousTmp = $env:TMP
 $compilerTemp = Join-Path $PSScriptRoot 'compiler-temp'

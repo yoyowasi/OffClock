@@ -34,7 +34,8 @@ namespace OffClock
         Binary,
         Octal,
         Hexadecimal,
-        Earnings
+        Earnings,
+        Payday
     }
 
     internal sealed class ClockSettings
@@ -53,13 +54,28 @@ namespace OffClock
         public readonly bool AutoUpdate;
         // Empty: the bar follows the theme's state color.
         public readonly Color ProgressColor;
+        public readonly bool ShowOvertime;
+        // Work-day mask (see WorkWeek), whether public holidays are days off, payday 1..31 (0: off).
+        public readonly int WorkDays;
+        public readonly bool SkipHolidays;
+        public readonly int Payday;
+        // Kept as saved; only counts while its date is the current work date.
+        public readonly DayOverride TodayOverride;
 
         public ClockSettings(Schedule schedule, DisplayMode display, string monitor = "",
             int transparency = 0, bool showProgress = true, bool notifyAtEnd = false, ClockTheme theme = ClockTheme.Dark,
-            bool pinInside = true, long annualSalary = 0, bool autoUpdate = false, Color progressColor = default(Color))
+            bool pinInside = true, long annualSalary = 0, bool autoUpdate = false, Color progressColor = default(Color),
+            bool showOvertime = false, int workDays = WorkWeek.Default, bool skipHolidays = true, int payday = 0,
+            DayOverride todayOverride = null)
         {
+            ShowOvertime = showOvertime;
+            WorkDays = (workDays & 0x7F) == 0 ? WorkWeek.Default : workDays & 0x7F;
+            SkipHolidays = skipHolidays;
+            Payday = Math.Max(0, Math.Min(31, payday));
+            TodayOverride = todayOverride;
             Schedule = schedule;
-            Display = display == DisplayMode.Earnings && annualSalary <= 0 ? DisplayMode.Clock : display;
+            Display = (display == DisplayMode.Earnings && annualSalary <= 0) ||
+                (display == DisplayMode.Payday && Payday == 0) ? DisplayMode.Clock : display;
             Monitor = monitor;
             Transparency = Math.Max(0, Math.Min(MaxTransparency, transparency));
             ShowProgress = showProgress;
@@ -69,6 +85,103 @@ namespace OffClock
             AnnualSalary = Math.Max(0, annualSalary);
             AutoUpdate = autoUpdate;
             ProgressColor = BarColor.Opaque(progressColor);
+        }
+
+        public ClockSettings WithDisplay(DisplayMode value)
+        {
+            return Copy(value, Theme, TodayOverride);
+        }
+
+        public ClockSettings WithTheme(ClockTheme value)
+        {
+            return Copy(Display, value, TodayOverride);
+        }
+
+        public ClockSettings WithOverride(DayOverride value)
+        {
+            return Copy(Display, Theme, value);
+        }
+
+        // The one place every field is copied: add new fields here so a copy never resets them.
+        private ClockSettings Copy(DisplayMode display, ClockTheme theme, DayOverride todayOverride)
+        {
+            return new ClockSettings(Schedule, display, Monitor, Transparency, ShowProgress, NotifyAtEnd, theme,
+                PinInside, AnnualSalary, AutoUpdate, ProgressColor, ShowOvertime, WorkDays, SkipHolidays, Payday,
+                todayOverride);
+        }
+
+        public WorkCalendar Calendar(HolidayCalendar holidays)
+        {
+            return new WorkCalendar(WorkDays, SkipHolidays, holidays);
+        }
+
+        // Today-only changes are for day shifts that stay within one calendar day. Overnight shifts and
+        // entries past midnight need per-shift windows, which proved error-prone; the menu refuses them.
+        public bool SupportsOverride { get { return Schedule.Start < Schedule.End; } }
+
+        public DateTime TargetDate(DateTime now)
+        {
+            return Schedule.WorkDateAt(now).Date;
+        }
+
+        // The override in force now: the one set for today, on a day-shift schedule.
+        public DayOverride ActiveOverride(DateTime now)
+        {
+            if (TodayOverride == null || !SupportsOverride || TodayOverride.Date != TargetDate(now)) return null;
+            // The settings file is editable by hand: ignore hours that are not a same-day window.
+            if (!TodayOverride.Off && TodayOverride.End <= TodayOverride.Start) return null;
+            return TodayOverride;
+        }
+
+        // The schedule in force now: the base one, or today's hours when overridden.
+        public Schedule ScheduleAt(DateTime now)
+        {
+            DayOverride active = ActiveOverride(now);
+            return active != null && !active.Off ? Schedule.WithWindow(active.Start, active.End) : Schedule;
+        }
+
+        // The schedule of one work date: today's hours only for the override's own date, else the base one.
+        public Schedule ScheduleFor(DateTime workDate)
+        {
+            if (TodayOverride != null && SupportsOverride && TodayOverride.Date == workDate.Date &&
+                !TodayOverride.Off && TodayOverride.End > TodayOverride.Start)
+                return Schedule.WithWindow(TodayOverride.Start, TodayOverride.End);
+            return Schedule;
+        }
+
+        // Whether a work date is a day off: its override first (rest: yes, hours: no), then the calendar.
+        public bool IsDayOff(DateTime workDate, HolidayCalendar holidays)
+        {
+            if (TodayOverride != null && SupportsOverride && TodayOverride.Date == workDate.Date &&
+                (TodayOverride.Off || TodayOverride.End > TodayOverride.Start))
+                return TodayOverride.Off;
+            return Calendar(holidays).DayOffName(workDate.Date) != null;
+        }
+
+        // What the widget shows now, in one place: a day off, or the countdown of today's schedule.
+        public Countdown CountdownAt(DateTime now, HolidayCalendar holidays)
+        {
+            DayOverride active = ActiveOverride(now);
+            if (active != null)
+                return active.Off ? Countdown.DayOff("오늘 쉼") : ScheduleAt(now).At(now, active.Date);
+            string name = Calendar(holidays).DayOffName(Schedule.WorkDateAt(now));
+            return name != null ? Countdown.DayOff(name) : Schedule.At(now);
+        }
+
+        public long EarnedAt(DateTime now, Countdown countdown, HolidayCalendar holidays)
+        {
+            if (countdown.Target == CountdownTarget.DayOff) return 0;
+            // Hours entered for today make it a work day even when the calendar says otherwise.
+            DayOverride active = ActiveOverride(now);
+            return PayEstimate.At(AnnualSalary, active != null ? active.Date : Schedule.WorkDateAt(now),
+                countdown.Progress, Calendar(holidays), active != null);
+        }
+
+        // Days until the next payday (0: today); null when no payday is set.
+        public int? PaydayDaysLeft(DateTime now, HolidayCalendar holidays)
+        {
+            if (Payday <= 0) return null;
+            return Math.Max(0, (PaydayRule.Next(Payday, now.Date, holidays) - now.Date).Days);
         }
     }
 
@@ -129,6 +242,16 @@ namespace OffClock
                 text.Append(groups[group]);
             }
             return text.Append(" 원").ToString();
+        }
+
+        // Work days come from the user's calendar; a duty day is paid even if the calendar calls it a day off.
+        public static long At(long annualSalary, DateTime workDate, double progress, WorkCalendar calendar,
+            bool dutyDay = false)
+        {
+            if (!dutyDay && !calendar.IsWorkDay(workDate)) return 0;
+            int days = calendar.WorkDaysInMonth(workDate.Year, workDate.Month);
+            if (days == 0) return 0;
+            return (long)(annualSalary / 12m / days * (decimal)progress);
         }
 
         public static long At(long annualSalary, DateTime workDate, double progress)
@@ -203,6 +326,41 @@ namespace OffClock
         private TimeSpan LunchOffset { get { return Wrap(Lunch.Start - Start); } }
         private TimeSpan LunchLength { get { return Lunch.Length; } }
 
+        // The same lunch break stays on only if it lies fully inside the new hours.
+        public Schedule WithWindow(TimeSpan start, TimeSpan end)
+        {
+            TimeSpan shift = Wrap(end - start);
+            bool inside = Lunch.Enabled && LunchLength < shift && Wrap(Lunch.Start - start) + LunchLength <= shift;
+            return new Schedule(start, end, new LunchBreak(inside, Lunch.Start, Lunch.End));
+        }
+
+        // Half of the paid time, rounded down to the minute.
+        private TimeSpan HalfOfWork
+        {
+            get
+            {
+                TimeSpan net = Wrap(End - Start) - (Lunch.Enabled ? LunchLength : TimeSpan.Zero);
+                return TimeSpan.FromMinutes(Math.Floor(net.TotalMinutes / 2));
+            }
+        }
+
+        // 오후 반차: work the morning half, with lunch counted if it falls inside.
+        public Schedule HalfDayAfternoonOff()
+        {
+            TimeSpan half = HalfOfWork;
+            TimeSpan end = Start + half + (Lunch.Enabled && LunchOffset < half ? LunchLength : TimeSpan.Zero);
+            return WithWindow(Start, Wrap(end));
+        }
+
+        // 오전 반차: work the afternoon half.
+        public Schedule HalfDayMorningOff()
+        {
+            TimeSpan half = HalfOfWork;
+            TimeSpan shift = Wrap(End - Start);
+            TimeSpan lead = half + (Lunch.Enabled && LunchOffset + LunchLength > shift - half ? LunchLength : TimeSpan.Zero);
+            return WithWindow(Wrap(End - lead), End);
+        }
+
         internal static TimeSpan Wrap(TimeSpan time)
         {
             return TimeSpan.FromTicks((time.Ticks % Day.Ticks + Day.Ticks) % Day.Ticks);
@@ -210,11 +368,19 @@ namespace OffClock
 
         public Countdown At(DateTime now)
         {
-            DateTime end = DeadlineAt(now);
-            DateTime start = WorkDateAt(now).Add(Start);
+            return At(now, WorkDateAt(now));
+        }
+
+        // The shift instance that starts at workDate + Start (it may end the next day).
+        public Countdown At(DateTime now, DateTime workDate)
+        {
+            DateTime start = workDate.Date.Add(Start);
+            DateTime end = start + Wrap(End - Start);
 
             TimeSpan remaining = now < end ? end - now : TimeSpan.Zero;
-            if (!Lunch.Enabled) return new Countdown(remaining, Ratio(now - start, end - start));
+            TimeSpan overtime = now < end ? TimeSpan.Zero : now - end;
+            if (!Lunch.Enabled)
+                return new Countdown(remaining, Ratio(now - start, end - start), CountdownTarget.Leave, overtime);
 
             // Progress, and so the day's pay, pauses over lunch.
             DateTime lunchStart = start.Add(LunchOffset);
@@ -224,7 +390,7 @@ namespace OffClock
             double progress = Ratio(worked, end - start - LunchLength);
             if (now < lunchStart) return new Countdown(lunchStart - now, progress, CountdownTarget.Lunch);
             if (now < lunchEnd) return new Countdown(lunchEnd - now, progress, CountdownTarget.LunchEnd);
-            return new Countdown(remaining, progress);
+            return new Countdown(remaining, progress, CountdownTarget.Leave, overtime);
         }
 
         private static double Ratio(TimeSpan part, TimeSpan whole)
@@ -253,9 +419,10 @@ namespace OffClock
 
     internal sealed class FinishReminder
     {
-        private static readonly TimeSpan MaxDelay = TimeSpan.FromMinutes(1);
         private readonly HashSet<DateTime> notifiedDeadlines = new HashSet<DateTime>();
         private DateTime previousCheck;
+        // The deadline of the most recent notification, for the caller's relevance window.
+        public DateTime LastDeadline { get; private set; }
 
         public FinishReminder(DateTime now)
         {
@@ -267,22 +434,25 @@ namespace OffClock
             previousCheck = now;
         }
 
-        public bool ShouldNotify(Schedule schedule, DateTime now)
+        // A late first look (sleep, resume) still counts while the notice is relevant.
+        public bool ShouldNotify(Schedule schedule, DateTime now, TimeSpan validFor)
         {
-            return Crossed(schedule.DeadlineAt(now), now);
+            return Crossed(schedule.DeadlineAt(now), now, validFor);
         }
 
-        public bool ShouldNotify(TimeSpan timeOfDay, DateTime now)
+        public bool ShouldNotify(TimeSpan timeOfDay, DateTime now, TimeSpan validFor)
         {
-            return Crossed(now.Date.Add(timeOfDay), now);
+            return Crossed(now.Date.Add(timeOfDay), now, validFor);
         }
 
-        private bool Crossed(DateTime deadline, DateTime now)
+        private bool Crossed(DateTime deadline, DateTime now, TimeSpan validFor)
         {
             if (deadline > now) deadline = deadline.AddDays(-1);
             bool crossedDeadline = previousCheck < deadline;
             previousCheck = now;
-            return crossedDeadline && now - deadline <= MaxDelay && notifiedDeadlines.Add(deadline);
+            bool due = crossedDeadline && now - deadline <= validFor && notifiedDeadlines.Add(deadline);
+            if (due) LastDeadline = deadline;
+            return due;
         }
     }
 
@@ -306,6 +476,7 @@ namespace OffClock
     internal sealed class MilestoneReminder
     {
         private static readonly TimeSpan EndingWarning = TimeSpan.FromMinutes(5);
+        private static readonly TimeSpan LeaveRelevance = TimeSpan.FromMinutes(30);
         private readonly FinishReminder leave;
         private readonly FinishReminder lunchStarts;
         private readonly FinishReminder lunchEnding;
@@ -324,17 +495,30 @@ namespace OffClock
             lunchEnding.Reset(now);
         }
 
+        // The notice stays worth showing until this time (set when Check returns a milestone).
+        public DateTime RelevantUntil { get; private set; }
+
         // Call on every tick so each reminder keeps its own last-check time.
         public Milestone Check(Schedule schedule, DateTime now)
         {
             LunchBreak lunch = schedule.Lunch;
-            bool leaving = leave.ShouldNotify(schedule, now);
-            bool starts = lunch.Enabled && lunchStarts.ShouldNotify(lunch.Start, now);
+            bool leaving = leave.ShouldNotify(schedule, now, LeaveRelevance);
+            bool starts = lunch.Enabled && lunchStarts.ShouldNotify(lunch.Start, now, lunch.Length);
             bool ending = lunch.Enabled && lunch.Length > EndingWarning + EndingWarning &&
-                lunchEnding.ShouldNotify(Schedule.Wrap(lunch.End - EndingWarning), now);
-            if (leaving) return Milestone.Leave;
-            if (starts) return Milestone.LunchStarts;
-            return ending ? Milestone.LunchEnding : Milestone.None;
+                lunchEnding.ShouldNotify(Schedule.Wrap(lunch.End - EndingWarning), now, EndingWarning);
+            if (leaving)
+            {
+                RelevantUntil = leave.LastDeadline + LeaveRelevance;
+                return Milestone.Leave;
+            }
+            if (starts)
+            {
+                RelevantUntil = lunchStarts.LastDeadline + lunch.Length;
+                return Milestone.LunchStarts;
+            }
+            if (!ending) return Milestone.None;
+            RelevantUntil = lunchEnding.LastDeadline + EndingWarning;
+            return Milestone.LunchEnding;
         }
     }
 
@@ -342,7 +526,8 @@ namespace OffClock
     {
         Leave,
         Lunch,
-        LunchEnd
+        LunchEnd,
+        DayOff
     }
 
     internal struct Countdown
@@ -351,7 +536,14 @@ namespace OffClock
         public readonly TimeSpan Remaining;
         public readonly double Progress;
         public readonly CountdownTarget Target;
-        public bool Finished { get { return Target == CountdownTarget.Leave && Remaining == TimeSpan.Zero; } }
+        // Time since the leave deadline once finished; zero otherwise.
+        public readonly TimeSpan Overtime;
+        // Name of the day off (holiday, weekend...) when Target is DayOff.
+        public readonly string DayOffName;
+        public bool Finished
+        {
+            get { return Target == CountdownTarget.DayOff || (Target == CountdownTarget.Leave && Remaining == TimeSpan.Zero); }
+        }
 
         public CountdownStage Stage
         {
@@ -366,11 +558,25 @@ namespace OffClock
             }
         }
 
-        public Countdown(TimeSpan remaining, double progress, CountdownTarget target = CountdownTarget.Leave)
+        public Countdown(TimeSpan remaining, double progress, CountdownTarget target = CountdownTarget.Leave,
+            TimeSpan overtime = default(TimeSpan), string dayOffName = null)
         {
             Remaining = remaining;
             Progress = progress;
             Target = target;
+            Overtime = overtime;
+            DayOffName = dayOffName;
+        }
+
+        public static Countdown DayOff(string name)
+        {
+            return new Countdown(TimeSpan.Zero, 0, CountdownTarget.DayOff, TimeSpan.Zero, name);
+        }
+
+        // The overtime as a running count, so it formats like any other remaining time.
+        public Countdown AsOvertime()
+        {
+            return new Countdown(Overtime, Progress);
         }
 
         public string Seconds { get { return Remaining.ToString(@"hh\:mm\:ss", CultureInfo.InvariantCulture); } }
@@ -469,8 +675,20 @@ namespace OffClock
                     Schedule schedule;
                     try { schedule = new Schedule(start, end, lunch); }
                     catch (ArgumentException) { schedule = new Schedule(start, end, new LunchBreak(false, lunch.Start, lunch.End)); }
+                    bool showOvertime;
+                    if (lines.Length < 14 || !bool.TryParse(lines[13], out showOvertime)) showOvertime = false;
+                    int workDays;
+                    if (lines.Length < 15 || !WorkWeek.TryParse(lines[14], out workDays)) workDays = WorkWeek.Default;
+                    bool skipHolidays;
+                    if (lines.Length < 16 || !bool.TryParse(lines[15], out skipHolidays)) skipHolidays = true;
+                    int payday;
+                    if (lines.Length < 17 || !int.TryParse(lines[16], NumberStyles.Integer,
+                        CultureInfo.InvariantCulture, out payday) || payday < 0 || payday > 31)
+                        payday = 0;
+                    DayOverride todayOverride = lines.Length >= 18 ? DayOverride.Parse(lines[17]) : null;
                     return new ClockSettings(schedule, display, lines.Length >= 4 ? lines[3] : "",
-                        transparency, showProgress, notifyAtEnd, theme, pinInside, salary, autoUpdate, progressColor);
+                        transparency, showProgress, notifyAtEnd, theme, pinInside, salary, autoUpdate, progressColor,
+                        showOvertime, workDays, skipHolidays, payday, todayOverride);
                 }
             }
             catch (IOException) { }
@@ -498,7 +716,13 @@ namespace OffClock
                 settings.AnnualSalary.ToString(CultureInfo.InvariantCulture),
                 settings.AutoUpdate ? "AutoInstall" : "Off",
                 BarColor.Format(settings.ProgressColor),
-                settings.Schedule.Lunch.Format()
+                settings.Schedule.Lunch.Format(),
+                settings.ShowOvertime.ToString(),
+                WorkWeek.Format(settings.WorkDays),
+                settings.SkipHolidays.ToString(),
+                settings.Payday.ToString(CultureInfo.InvariantCulture),
+                // A stale override (another work date) is written back as empty.
+                settings.ActiveOverride(DateTime.Now) == null ? "" : settings.TodayOverride.Format()
             });
             if (File.Exists(path))
                 File.Replace(temporaryPath, path, null);
