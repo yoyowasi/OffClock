@@ -15,7 +15,7 @@ using Timer = System.Windows.Forms.Timer;
 
 [assembly: System.Reflection.AssemblyTitle("퇴근시계")]
 [assembly: System.Reflection.AssemblyDescription("Windows 작업표시줄 퇴근 카운트다운")]
-[assembly: System.Reflection.AssemblyVersion("1.5.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.5.1.0")]
 
 namespace OffClock
 {

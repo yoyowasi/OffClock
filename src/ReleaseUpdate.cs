@@ -5,8 +5,10 @@ using System.Globalization;
 using System.Drawing;
 using System.IO;
 using System.IO.Compression;
+using System.Net;
 using System.Reflection;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -17,7 +19,7 @@ namespace OffClock
 {
     internal sealed class ReleaseUpdate
     {
-        private const string Repository = "github.com/yoyowasi/OffClock";
+        private const string Repository = "yoyowasi/OffClock";
         private const string Asset = "OffClock.zip";
         private const string Exe = "OffClock.exe";
         private const int MaxFileSize = 16 * 1024 * 1024;
@@ -37,8 +39,14 @@ namespace OffClock
 
         public static ReleaseUpdate Check()
         {
-            string response = RunGh("api --hostname github.com repos/yoyowasi/OffClock/releases/latest");
-            return FromJson(response, typeof(ReleaseUpdate).Assembly.GetName().Version);
+            return FromJson(LatestJson(), typeof(ReleaseUpdate).Assembly.GetName().Version);
+        }
+
+        internal static string LatestJson()
+        {
+            using (var response = Get("https://api.github.com/repos/" + Repository + "/releases/latest", "application/vnd.github+json"))
+            using (var reader = new StreamReader(response.GetResponseStream(), new UTF8Encoding(false)))
+                return reader.ReadToEnd();
         }
 
         internal static ReleaseUpdate FromJson(string response, Version installed)
@@ -66,12 +74,23 @@ namespace OffClock
             Directory.CreateDirectory(folder);
             try
             {
-                RunGh("release download " + Tag + " --repo " + Repository +
-                    " --pattern " + Asset + " --dir " + Quote(folder));
                 string archivePath = Path.Combine(folder, Asset);
+                // Tag passed the version pattern in FromJson, so it is safe to put in the URL.
+                using (var response = Get("https://github.com/" + Repository + "/releases/download/" + Tag + "/" + Asset,
+                    "application/octet-stream"))
+                using (var body = response.GetResponseStream())
+                using (var output = File.Create(archivePath))
+                {
+                    var buffer = new byte[81920];
+                    int read;
+                    while ((read = body.Read(buffer, 0, buffer.Length)) > 0)
+                    {
+                        if (output.Length + read > MaxFileSize) throw new InvalidDataException("업데이트 파일이 너무 큽니다.");
+                        output.Write(buffer, 0, read);
+                    }
+                }
                 using (var input = File.OpenRead(archivePath))
                 {
-                    if (input.Length > MaxFileSize) throw new InvalidDataException("업데이트 파일이 너무 큽니다.");
                     using (var sha = SHA256.Create())
                     {
                         string actual = BitConverter.ToString(sha.ComputeHash(input)).Replace("-", "");
@@ -249,37 +268,35 @@ namespace OffClock
             });
         }
 
-        private static string RunGh(string arguments)
+        // The repository is public, so no sign-in is needed, but GitHub allows 60 anonymous API calls per hour per IP.
+        private static HttpWebResponse Get(string url, string accept)
         {
-            string executable = null;
-            foreach (string entry in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
+            // csc builds carry no target framework, so .NET offers only SSL 3 and TLS 1.0, which GitHub refuses.
+            if (ServicePointManager.SecurityProtocol != SecurityProtocolType.SystemDefault)
+                ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+            var request = (HttpWebRequest)WebRequest.Create(url);
+            request.UserAgent = "OffClock";
+            request.Accept = accept;
+            request.Timeout = request.ReadWriteTimeout = 45000;
+            // Company proxies often ask for the Windows sign-in.
+            if (request.Proxy != null) request.Proxy.Credentials = CredentialCache.DefaultNetworkCredentials;
+            try { return (HttpWebResponse)request.GetResponse(); }
+            catch (WebException ex)
             {
-                string directory = entry.Trim().Trim('"');
-                if (!Path.IsPathRooted(directory)) continue;
-                string candidate = Path.Combine(directory, "gh.exe");
-                if (File.Exists(candidate)) { executable = candidate; break; }
-            }
-            if (executable == null) throw new InvalidOperationException("GitHub CLI(gh)를 설치하고 로그인하세요.");
-
-            // gh writes UTF-8; without this a window app reads it as the ANSI code page (CP949 on Korean Windows).
-            var start = new ProcessStartInfo(executable, arguments)
-            {
-                UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true,
-                StandardOutputEncoding = new System.Text.UTF8Encoding(false)
-            };
-            start.EnvironmentVariables["GH_PROMPT_DISABLED"] = "1";
-            using (var process = Process.Start(start))
-            {
-                var output = process.StandardOutput.ReadToEndAsync();
-                if (!process.WaitForExit(45000))
+                var response = ex.Response as HttpWebResponse;
+                if (response != null)
                 {
-                    try { process.Kill(); }
-                    catch (InvalidOperationException) { }
-                    throw new IOException("GitHub 요청 시간이 초과되었습니다.");
+                    using (response)
+                    {
+                        if ((int)response.StatusCode == 429 || (response.StatusCode == HttpStatusCode.Forbidden &&
+                            response.Headers["X-RateLimit-Remaining"] == "0"))
+                            throw new IOException("GitHub 요청 한도를 넘었습니다. 잠시 후(최대 1시간) 다시 시도하세요.", ex);
+                        throw new IOException("GitHub가 오류(HTTP " + ((int)response.StatusCode).ToString(CultureInfo.InvariantCulture) +
+                            ")를 돌려주었습니다. 잠시 후 다시 시도하세요.", ex);
+                    }
                 }
-                if (process.ExitCode != 0)
-                    throw new IOException("GitHub 연결과 OffClock 저장소에 접근할 수 있는 gh 로그인을 확인하세요.");
-                return output.GetAwaiter().GetResult();
+                if (ex.Status == WebExceptionStatus.Timeout) throw new IOException("GitHub 요청 시간이 초과되었습니다.", ex);
+                throw new IOException("GitHub에 연결할 수 없습니다. 인터넷 연결을 확인하세요.", ex);
             }
         }
 
